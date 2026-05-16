@@ -89,64 +89,6 @@
         </svg>
       </div>
       <div class="bgc-bubble" aria-hidden="true"></div>
-      <section class="bgc-agent-panel" aria-label="Agent panel" tabindex="0">
-        <div class="bgc-agent-collapsed" aria-hidden="true">
-          <span class="bgc-agent-dot"></span>
-        </div>
-        <div class="bgc-agent-expanded" aria-hidden="true">
-          <header class="bgc-panel-header">
-            <div class="bgc-panel-title">
-              <span class="bgc-panel-dot"></span>
-              <span class="bgc-panel-name">Coordinator</span>
-            </div>
-            <span class="bgc-panel-badge">orchestrating</span>
-          </header>
-
-          <div class="bgc-panel-summary">Monitoring agent progress...</div>
-
-          <div class="bgc-agent-rows">
-            <div class="bgc-agent-tree" aria-hidden="true"></div>
-
-            <div class="bgc-agent-row">
-              <div class="bgc-agent-row-top">
-                <span class="bgc-agent-row-label">
-                  <span class="bgc-row-dot is-green"></span>
-                  <span class="bgc-row-name">Auth Agent</span>
-                </span>
-                <span class="bgc-row-file">jwt-service.ts</span>
-              </div>
-              <div class="bgc-agent-row-task">Signing with RS256...</div>
-            </div>
-
-            <div class="bgc-agent-row">
-              <div class="bgc-agent-row-top">
-                <span class="bgc-agent-row-label">
-                  <span class="bgc-row-dot is-blue"></span>
-                  <span class="bgc-row-name">API Agent</span>
-                </span>
-                <span class="bgc-row-file">routes/auth.ts</span>
-              </div>
-              <div class="bgc-agent-row-task">Validating headers...</div>
-            </div>
-
-            <div class="bgc-agent-row">
-              <div class="bgc-agent-row-top">
-                <span class="bgc-agent-row-label">
-                  <span class="bgc-row-dot is-purple"></span>
-                  <span class="bgc-row-name">Test Agent</span>
-                </span>
-                <span class="bgc-row-file">auth.test.ts</span>
-              </div>
-              <div class="bgc-agent-row-task">Mocking responses...</div>
-            </div>
-          </div>
-
-          <footer class="bgc-panel-footer">
-            <span class="bgc-footer-glyph">&#8596;</span>
-            <span class="bgc-footer-line">All agents synced to <span class="bgc-footer-target">auth-refactor.md</span></span>
-          </footer>
-        </div>
-      </section>
     `;
     return root;
   }
@@ -180,7 +122,6 @@
     document.body.appendChild(root);
     cursorEl = root.querySelector(".bgc-cursor");
     bubbleEl = root.querySelector(".bgc-bubble");
-    root.classList.toggle("is-bgc-disabled", !enabled);
     startTime = performance.now();
     if (rafId) cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(tick);
@@ -447,9 +388,8 @@
   // ---------- Settings sync ----------
   function applyEnabled(next) {
     enabled = !!next;
-    mount();
-    if (root) root.classList.toggle("is-bgc-disabled", !enabled);
-    if (!enabled) stopRecognition();
+    if (enabled) mount();
+    else unmount();
   }
 
   function applySpeed(next) {
@@ -514,3 +454,4 @@
   // Expose popupHandler to the runtime listener (closure capture).
   window.__bgcPopupHandler = popupHandler;
 })();
+

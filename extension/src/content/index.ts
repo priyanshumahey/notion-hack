@@ -24,6 +24,8 @@ import { DwellTracker, type DwellSnapshot } from "../lib/dwell";
 import type { RawEvent, Fingerprint, PageContext, FormContext, DwellMeta } from "../lib/types";
 
 const log = makeLog("content");
+const AGENT_PANEL_ROOT_ID = "notion-hack-agent-panel-root";
+const AGENT_PANEL_STYLE_ID = "notion-hack-agent-panel-style";
 
 // Guard against double-injection (HMR / re-injection after install).
 if ((window as unknown as { __nhInstalled?: boolean }).__nhInstalled) {
@@ -35,6 +37,7 @@ if ((window as unknown as { __nhInstalled?: boolean }).__nhInstalled) {
 
 function install() {
   log("loaded on", location.href);
+  mountAgentPanel();
 
   // ---- dwell tracker (one per URL) --------------------------------------
   let tracker = new DwellTracker(location.href, canonicalizeUrl(location.href));
@@ -104,6 +107,7 @@ function install() {
   window.addEventListener(
     "click",
     (e) => {
+      if (isAgentPanelEvent(e)) return;
       tracker.recordInteraction();
       const fp = fingerprintOf(e.target, location.href);
       if (!fp) return;
@@ -121,6 +125,7 @@ function install() {
   window.addEventListener(
     "submit",
     (e) => {
+      if (isAgentPanelEvent(e)) return;
       tracker.recordInteraction();
       const target = e.target;
       const fp = fingerprintOf(target, location.href);
@@ -146,6 +151,7 @@ function install() {
   window.addEventListener(
     "input",
     (e) => {
+      if (isAgentPanelEvent(e)) return;
       const el = e.target;
       if (!(el instanceof Element)) return;
       const prev = inputDebounce.get(el);
@@ -253,6 +259,279 @@ function install() {
     window.setTimeout(fire, 3000);
   }
 }
+
+function mountAgentPanel() {
+  const mountTarget = document.body || document.documentElement;
+  if (!mountTarget) {
+    window.setTimeout(mountAgentPanel, 50);
+    return;
+  }
+
+  document.getElementById(AGENT_PANEL_ROOT_ID)?.remove();
+  if (!document.getElementById(AGENT_PANEL_STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = AGENT_PANEL_STYLE_ID;
+    style.textContent = AGENT_PANEL_CSS;
+    document.documentElement.appendChild(style);
+  }
+
+  const root = document.createElement("section");
+  root.id = AGENT_PANEL_ROOT_ID;
+  root.setAttribute("aria-label", "Agent orchestrator");
+  root.tabIndex = 0;
+  root.innerHTML = `
+    <div class="nh-agent-collapsed" aria-hidden="true">
+      <span class="nh-agent-dot"></span>
+    </div>
+    <div class="nh-agent-expanded" aria-hidden="true">
+      <div class="nh-agent-header">
+        <div class="nh-agent-title-row">
+          <span class="nh-agent-status-dot"></span>
+          <span class="nh-agent-title">Orchestrator</span>
+        </div>
+        <span class="nh-agent-status">3 running</span>
+      </div>
+      <div class="nh-agent-list">
+        <div class="nh-agent-row">
+          <div class="nh-agent-row-top">
+            <span class="nh-agent-name"><span class="nh-agent-row-dot is-green"></span>Auth Agent</span>
+            <span class="nh-agent-file">jwt-service.ts</span>
+          </div>
+          <div class="nh-agent-task">Signing with RS256...</div>
+        </div>
+        <div class="nh-agent-row">
+          <div class="nh-agent-row-top">
+            <span class="nh-agent-name"><span class="nh-agent-row-dot is-blue"></span>API Agent</span>
+            <span class="nh-agent-file">routes/auth.ts</span>
+          </div>
+          <div class="nh-agent-task">Validating headers...</div>
+        </div>
+        <div class="nh-agent-row">
+          <div class="nh-agent-row-top">
+            <span class="nh-agent-name"><span class="nh-agent-row-dot is-purple"></span>Test Agent</span>
+            <span class="nh-agent-file">auth.test.ts</span>
+          </div>
+          <div class="nh-agent-task">Mocking responses...</div>
+        </div>
+      </div>
+    </div>
+  `;
+  mountTarget.appendChild(root);
+}
+
+function isAgentPanelEvent(e: Event): boolean {
+  const target = e.target;
+  return target instanceof Element && !!target.closest(`#${AGENT_PANEL_ROOT_ID}`);
+}
+
+const AGENT_PANEL_CSS = `
+#${AGENT_PANEL_ROOT_ID} {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: 46px;
+  height: 46px;
+  z-index: 2147483647;
+  box-sizing: border-box;
+  border: 1px solid rgba(47, 140, 255, 0.18);
+  border-radius: 14px;
+  background: #101318;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  color: #eef3f8;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+  pointer-events: auto;
+  user-select: none;
+  transition: width 180ms ease, height 180ms ease, border-radius 180ms ease, box-shadow 180ms ease;
+}
+
+#${AGENT_PANEL_ROOT_ID},
+#${AGENT_PANEL_ROOT_ID} * {
+  box-sizing: border-box;
+}
+
+#${AGENT_PANEL_ROOT_ID}:hover,
+#${AGENT_PANEL_ROOT_ID}:focus,
+#${AGENT_PANEL_ROOT_ID}:focus-within {
+  width: 292px;
+  height: 178px;
+  border-radius: 16px;
+  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.36), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  outline: none;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-collapsed {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  transition: opacity 120ms ease;
+}
+
+#${AGENT_PANEL_ROOT_ID}:hover .nh-agent-collapsed,
+#${AGENT_PANEL_ROOT_ID}:focus .nh-agent-collapsed,
+#${AGENT_PANEL_ROOT_ID}:focus-within .nh-agent-collapsed {
+  opacity: 0;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 6px;
+  background: #2f8cff;
+  box-shadow: 0 0 0 6px rgba(47, 140, 255, 0.12);
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-expanded {
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 140ms ease 55ms, transform 140ms ease 55ms;
+}
+
+#${AGENT_PANEL_ROOT_ID}:hover .nh-agent-expanded,
+#${AGENT_PANEL_ROOT_ID}:focus .nh-agent-expanded,
+#${AGENT_PANEL_ROOT_ID}:focus-within .nh-agent-expanded {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 13px 14px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-title-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #20c76f;
+  box-shadow: 0 0 0 3px rgba(32, 199, 111, 0.12);
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-title {
+  overflow: hidden;
+  color: #f4f4f4;
+  font-size: 13px;
+  line-height: 1;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-status {
+  display: inline-flex;
+  align-items: center;
+  max-width: 96px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(47, 140, 255, 0.13);
+  color: #87bfff;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 650;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-list {
+  display: grid;
+  gap: 0;
+  padding: 4px 8px 8px;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row {
+  min-width: 0;
+  padding: 8px 6px;
+  border-radius: 9px;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row + .nh-agent-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-name {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  overflow: hidden;
+  color: #eeeeee;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot.is-green {
+  background: #229653;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot.is-blue {
+  background: #2f7de1;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot.is-purple {
+  background: #8e47d6;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-file {
+  flex: 0 0 auto;
+  overflow: hidden;
+  max-width: 96px;
+  color: #788492;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-task {
+  overflow: hidden;
+  padding-left: 14px;
+  color: #8f99a6;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+`;
 
 function modifiers(e: MouseEvent): string[] {
   const m: string[] = [];
