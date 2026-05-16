@@ -89,6 +89,22 @@
         </svg>
       </div>
       <div class="bgc-bubble" aria-hidden="true"></div>
+      <section class="bgc-agent-panel" aria-label="Agent panel" tabindex="0">
+        <div class="bgc-agent-collapsed" aria-hidden="true">
+          <span class="bgc-agent-dot"></span>
+        </div>
+        <div class="bgc-agent-expanded" aria-hidden="true">
+          <div class="bgc-agent-header">
+            <span class="bgc-agent-title">Agent</span>
+            <span class="bgc-agent-status">Ready</span>
+          </div>
+          <div class="bgc-agent-body">
+            <button type="button" class="bgc-agent-action">Ask</button>
+            <button type="button" class="bgc-agent-action">Summarize</button>
+            <button type="button" class="bgc-agent-action">Capture</button>
+          </div>
+        </div>
+      </section>
     `;
     return root;
   }
@@ -454,4 +470,3 @@
   // Expose popupHandler to the runtime listener (closure capture).
   window.__bgcPopupHandler = popupHandler;
 })();
-
