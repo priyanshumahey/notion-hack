@@ -94,30 +94,57 @@
           <span class="bgc-agent-dot"></span>
         </div>
         <div class="bgc-agent-expanded" aria-hidden="true">
-          <div class="bgc-agent-header">
-            <span class="bgc-agent-title">Agent tasks</span>
-            <span class="bgc-agent-status">62%</span>
-          </div>
-          <div class="bgc-agent-progress" aria-hidden="true">
-            <span class="bgc-agent-progress-fill"></span>
-          </div>
-          <div class="bgc-agent-body">
-            <div class="bgc-agent-task is-done">
-              <span class="bgc-agent-check"></span>
-              <span class="bgc-agent-task-copy">Read current page</span>
-              <span class="bgc-agent-task-meta">Done</span>
+          <header class="bgc-panel-header">
+            <div class="bgc-panel-title">
+              <span class="bgc-panel-dot"></span>
+              <span class="bgc-panel-name">Coordinator</span>
             </div>
-            <div class="bgc-agent-task is-active">
-              <span class="bgc-agent-check"></span>
-              <span class="bgc-agent-task-copy">Build context</span>
-              <span class="bgc-agent-task-meta">2/3</span>
+            <span class="bgc-panel-badge">orchestrating</span>
+          </header>
+
+          <div class="bgc-panel-summary">Monitoring agent progress...</div>
+
+          <div class="bgc-agent-rows">
+            <div class="bgc-agent-tree" aria-hidden="true"></div>
+
+            <div class="bgc-agent-row">
+              <div class="bgc-agent-row-top">
+                <span class="bgc-agent-row-label">
+                  <span class="bgc-row-dot is-green"></span>
+                  <span class="bgc-row-name">Auth Agent</span>
+                </span>
+                <span class="bgc-row-file">jwt-service.ts</span>
+              </div>
+              <div class="bgc-agent-row-task">Signing with RS256...</div>
             </div>
-            <div class="bgc-agent-task">
-              <span class="bgc-agent-check"></span>
-              <span class="bgc-agent-task-copy">Draft answer</span>
-              <span class="bgc-agent-task-meta">Next</span>
+
+            <div class="bgc-agent-row">
+              <div class="bgc-agent-row-top">
+                <span class="bgc-agent-row-label">
+                  <span class="bgc-row-dot is-blue"></span>
+                  <span class="bgc-row-name">API Agent</span>
+                </span>
+                <span class="bgc-row-file">routes/auth.ts</span>
+              </div>
+              <div class="bgc-agent-row-task">Validating headers...</div>
+            </div>
+
+            <div class="bgc-agent-row">
+              <div class="bgc-agent-row-top">
+                <span class="bgc-agent-row-label">
+                  <span class="bgc-row-dot is-purple"></span>
+                  <span class="bgc-row-name">Test Agent</span>
+                </span>
+                <span class="bgc-row-file">auth.test.ts</span>
+              </div>
+              <div class="bgc-agent-row-task">Mocking responses...</div>
             </div>
           </div>
+
+          <footer class="bgc-panel-footer">
+            <span class="bgc-footer-glyph">&#8596;</span>
+            <span class="bgc-footer-line">All agents synced to <span class="bgc-footer-target">auth-refactor.md</span></span>
+          </footer>
         </div>
       </section>
     `;
