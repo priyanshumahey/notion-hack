@@ -26,6 +26,13 @@ import type { RawEvent, Fingerprint, PageContext, FormContext, DwellMeta } from 
 const log = makeLog("content");
 const AGENT_PANEL_ROOT_ID = "notion-hack-agent-panel-root";
 const AGENT_PANEL_STYLE_ID = "notion-hack-agent-panel-style";
+const IS_TOP_FRAME = (() => {
+  try {
+    return window.self === window.top;
+  } catch {
+    return false;
+  }
+})();
 
 // Guard against double-injection (HMR / re-injection after install).
 if ((window as unknown as { __nhInstalled?: boolean }).__nhInstalled) {
@@ -37,7 +44,6 @@ if ((window as unknown as { __nhInstalled?: boolean }).__nhInstalled) {
 
 function install() {
   log("loaded on", location.href);
-  mountAgentPanel();
 
   // ---- dwell tracker (one per URL) --------------------------------------
   let tracker = new DwellTracker(location.href, canonicalizeUrl(location.href));
@@ -93,6 +99,14 @@ function install() {
     void send({ t: "evt", event: ev });
   }
 
+  if (IS_TOP_FRAME) {
+    try {
+      mountAgentPanel();
+    } catch (e) {
+      log.error("agent panel mount failed", e);
+    }
+  }
+
   /** Best-effort page-context capture. Never throws; returns undefined on hard failure. */
   function safeCapturePage(): PageContext | undefined {
     try {
@@ -104,20 +118,47 @@ function install() {
   }
 
   // ---- click ------------------------------------------------------------
+  let lastPointerTarget: EventTarget | null = null;
+  let lastPointerAt = 0;
+
+  function captureInteraction(e: MouseEvent | PointerEvent, source: "click" | "pointerdown") {
+    if (isAgentPanelEvent(e)) return;
+    if (source === "pointerdown") {
+      const pe = e as PointerEvent;
+      if (pe.button !== 0 || !pe.isPrimary) return;
+      lastPointerTarget = e.target;
+      lastPointerAt = Date.now();
+    } else if (lastPointerTarget === e.target && Date.now() - lastPointerAt < 700) {
+      return;
+    }
+
+    tracker.recordInteraction();
+    let fp: Fingerprint | undefined;
+    try {
+      fp = fingerprintOf(e.target, location.href);
+    } catch (err) {
+      log.error("fingerprint failed", err);
+    }
+    if (!fp) return;
+    emit("click", fp, {
+      meta: {
+        source,
+        button: e.button,
+        modifiers: modifiers(e),
+        frame: IS_TOP_FRAME ? "top" : "child",
+      },
+    });
+  }
+
+  window.addEventListener(
+    "pointerdown",
+    (e) => captureInteraction(e, "pointerdown"),
+    { capture: true, passive: true },
+  );
+
   window.addEventListener(
     "click",
-    (e) => {
-      if (isAgentPanelEvent(e)) return;
-      tracker.recordInteraction();
-      const fp = fingerprintOf(e.target, location.href);
-      if (!fp) return;
-      emit("click", fp, {
-        meta: {
-          button: (e as MouseEvent).button,
-          modifiers: modifiers(e as MouseEvent),
-        },
-      });
-    },
+    (e) => captureInteraction(e, "click"),
     { capture: true, passive: true },
   );
 
@@ -159,14 +200,25 @@ function install() {
       const handle = window.setTimeout(() => {
         inputDebounce.delete(el);
         tracker.recordInteraction();
-        const fp = fingerprintOf(el, location.href);
+        let fp: Fingerprint | undefined;
+        try {
+          fp = fingerprintOf(el, location.href);
+        } catch (err) {
+          log.error("input fingerprint failed", err);
+        }
         if (!fp) return;
-        emit("input-edited", fp);
+        emit("input-edited", fp, {
+          meta: {
+            frame: IS_TOP_FRAME ? "top" : "child",
+          },
+        });
       }, INPUT_DEBOUNCE_MS);
       inputDebounce.set(el, handle);
     },
     { capture: true, passive: true },
   );
+
+  if (!IS_TOP_FRAME) return;
 
   // ---- scroll (throttled by rAF) ----------------------------------------
   let scrollPending = false;

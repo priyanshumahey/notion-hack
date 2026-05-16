@@ -19,7 +19,7 @@ export default defineManifest({
       matches: ["<all_urls>"],
       js: ["src/content/index.ts"],
       run_at: "document_start",
-      all_frames: false,
+      all_frames: true,
     },
   ],
   permissions: ["storage", "tabs", "webNavigation", "activeTab", "scripting"],
