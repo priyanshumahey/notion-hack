@@ -18,8 +18,10 @@ export default defineManifest({
     {
       matches: ["<all_urls>"],
       js: ["src/content/index.ts"],
-      run_at: "document_idle",
+      run_at: "document_start",
+      all_frames: false,
     },
   ],
-  permissions: ["storage", "activeTab"],
+  permissions: ["storage", "tabs", "webNavigation", "activeTab", "scripting"],
+  host_permissions: ["<all_urls>"],
 });
