@@ -1,0 +1,28 @@
+{
+  "name": "notion-hack-extension",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Basic React + Tailwind Chrome (MV3) extension.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.34",
+    "@tailwindcss/vite": "^4.1.13",
+    "@types/chrome": "^0.0.270",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
