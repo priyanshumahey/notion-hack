@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Blue Ghost Cursor</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="row title">
+        <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 2 L3 19 L8 14.5 L11 21 L14 19.5 L11 13 L18 13 Z"
+                fill="#2f8cff" stroke="#ffffff" stroke-width="1.2"
+                stroke-linejoin="round" />
+        </svg>
+        <span>Blue Ghost Cursor</span>
+      </div>
+
+      <label class="row toggle">
+        <span>Enabled</span>
+        <input id="enabled" type="checkbox" />
+      </label>
+
+      <label class="row slider">
+        <span>Speed</span>
+        <input id="speed" type="range" min="0.25" max="2.5" step="0.05" />
+        <span id="speedVal" class="num">1.0</span>
+      </label>
+
+      <div class="row hotkey">
+        <span>Speak hotkey</span>
+        <button id="hotkey" type="button" class="hotkey-btn">Shift+Q</button>
+        <button id="hotkeyReset" type="button" class="reset-btn" title="Reset to default">↻</button>
+      </div>
+
+      <button id="testMic" type="button" class="test-btn">🎤 Test microphone</button>
+      <div id="status" class="status"></div>
+
+      <p class="hint">
+        The ghost cursor appears on regular web pages. Chrome internal pages
+        (chrome://, the New Tab page, the Web Store) cannot host content
+        scripts and will not show it.
+      </p>
+      <p class="hint">
+        Press the hotkey on any page to start dictating. The first time on a
+        new site, Chrome will ask for microphone permission.
+      </p>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,107 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 12px 14px;
+  min-width: 240px;
+  background: #fff;
+  color: #111;
+}
+
+@media (prefers-color-scheme: dark) {
+  body { background: #1c1c1e; color: #f2f2f7; }
+}
+
+.wrap { display: flex; flex-direction: column; gap: 10px; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.toggle { justify-content: space-between; }
+
+.slider input[type=range] { flex: 1; }
+
+.num {
+  min-width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.hint {
+  font-size: 11px;
+  opacity: 0.65;
+  margin: 4px 0 0;
+  line-height: 1.4;
+}
+
+.hotkey { justify-content: space-between; }
+
+.hotkey-btn {
+  flex: 1;
+  margin-left: 10px;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: rgba(127, 127, 127, 0.08);
+  color: inherit;
+  cursor: pointer;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.hotkey-btn.is-capturing {
+  border-color: #2f8cff;
+  background: rgba(47, 140, 255, 0.12);
+  color: #2f8cff;
+}
+
+.reset-btn {
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.test-btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #2f8cff;
+  background: #2f8cff;
+  color: #ffffff;
+  cursor: pointer;
+}
+.test-btn:active { transform: translateY(1px); }
+
+.status {
+  font-size: 11px;
+  min-height: 14px;
+  line-height: 1.3;
+  opacity: 0.8;
+}
+.status.warn { color: #c64a00; }
+.status.ok { color: #1e8e3e; }

@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Blue Ghost Cursor",
+  "version": "0.1.0",
+  "description": "Adds a second, autonomous blue mouse cursor that wanders around the page on its own.",
+  "permissions": ["storage", "offscreen", "scripting", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Blue Ghost Cursor",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
