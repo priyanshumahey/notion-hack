@@ -10,22 +10,30 @@
 //                       or interactions) that scores HIGH-VALUE on richness
 //                       (job posting, product, event, recipe, ...). One
 //                       observation is enough.
-//   4. repetition     — same pageKey cluster observed ≥ N times across
-//                       distinct URLs in the recent past. Used to catch
-//                       URL-based reading patterns.
-//   5. action-click   — user clicked ≥ N curated "action verb" buttons
-//                       (Bookmark, Save, Like, Follow, Add to cart, RSVP,
-//                       Subscribe, Wishlist, Star, Watch, Favorite, Pin,
-//                       Upvote) on the same host within a short window.
-//                       Catches the "I bookmarked 10 tweets" / "saved 5
-//                       jobs" / "wishlisted 4 products" pattern, which is
-//                       invisible to URL-based repetition.
+//   4. repetition     — same pageKey cluster observed ≥ N distinct URLs
+//                       in the recent past. Pure URL-pattern signal: NO
+//                       richness gate, NO dwell-duration gate. Fires on
+//                       every nav-with-page-context and every page-dwell
+//                       in the cluster — the LLM filters meaningfulness,
+//                       and a 7-day per-cluster throttle in ingest
+//                       prevents refires. Used to catch URL-based reading
+//                       patterns AND shopping-style browsing (3 car
+//                       listings, 5 product pages, 4 Airbnb listings, ...).
+//   5. action-click   — user clicked the same UI element ≥ N times on
+//                       the same host within a short window. "Same UI
+//                       element" = same testid OR same normalized
+//                       accessible-name / text label. NO verb whitelist;
+//                       we surface any repeated UI interaction and let
+//                       the LLM judge whether it's meaningful. Catches
+//                       "I bookmarked 10 tweets" / "saved 5 jobs" /
+//                       "wishlisted 4 products" — and also a long tail
+//                       of patterns we can't enumerate up front.
 //
 // All detectors are pure: they take in events and read-only history, return
 // zero-or-more triggers. Side effects (judge call, store write, throttling)
 // happen in background/ingest.ts.
 
-import type { AppEvent, DwellMeta } from "../types";
+import type { AppEvent, DwellMeta, Fingerprint } from "../types";
 import { scoreRichness, clusterKeyForEvent, type RichnessScore } from "./richness";
 
 export type TriggerReason =
@@ -66,11 +74,9 @@ const TERMINAL_PATH_RE =
 // because the judge call itself filters noise. Better to ask the LLM and
 // get a "not meaningful" than to miss something.
 const DWELL_HIGH_VALUE_FOREGROUND_MS = 6_000;   // 6 s on a job posting → trigger
-const DWELL_CONTENT_FOREGROUND_MS = 12_000;     // 12 s on an article  → eligible for repetition
 // Engaged-content shortcut: a "content" tier page with high engagement
-// (deep scroll + interactions) is a content-dwell trigger even below the
-// repetition threshold. Catches single deep-reads of tweets/articles where
-// the user clearly cared.
+// (deep scroll + interactions) is a content-dwell trigger. Catches single
+// deep-reads of tweets/articles where the user clearly cared.
 const DWELL_ENGAGED_FOREGROUND_MS = 6_000;
 const DWELL_ENGAGED_MIN_SCROLL_PCT = 70;
 const DWELL_ENGAGED_MIN_INTERACTIONS = 2;
@@ -80,55 +86,49 @@ const REPETITION_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;  // 30 days
 const REPETITION_MIN_DISTINCT_URLS = 3;                    // 3+ distinct URLs in cluster
 
 // ---- Action-click trigger tuning ------------------------------------------
-const ACTION_CLICK_WINDOW_MS = 5 * 60_000;  // 5 min rolling window per (host, verb)
-const ACTION_CLICK_MIN_COUNT = 2;           // 2 of the same action → pattern
+const ACTION_CLICK_WINDOW_MS = 5 * 60_000;  // 5 min rolling window per (host, signature)
+const ACTION_CLICK_MIN_COUNT = 2;           // 2 of the same signature → pattern
+const ACTION_CLICK_MIN_GAP_MS = 500;        // ignore near-duplicate fires (capture-phase double-fire)
+const SIGNATURE_MAX_LEN = 60;               // labels longer than this are tile-cards, not buttons
+const SIGNATURE_MIN_LEN = 2;                // labels shorter than this carry no signal
 
 /**
- * Map a click target label (accessibleName/text) to a canonical action verb,
- * or null. Matches whole-label only (the button text IS the verb) and
- * tolerates common toggled / past-tense forms.
+ * Compute a short, normalized signature for a click target. Two clicks
+ * with the same signature on the same host are treated as "the same UI
+ * action repeated".
  *
- * Keep this list curated and tight — false positives here mean spurious
- * candidates. If a verb shows up that we don't want, prefer adding a
- * negative match or tightening the regex over making it more permissive.
+ * NO verb / noun matching. We let the LLM decide whether a cluster of
+ * repeated clicks is meaningful — the detector's only job is to surface
+ * the pattern.
+ *
+ * Returns null when the click isn't a candidate for clustering:
+ *   - empty / whitespace label
+ *   - very long label (almost certainly a tile-card aggregate, not a button)
+ *   - very short label (no signal)
  */
-export function matchActionVerb(label: string | undefined | null): string | null {
-  if (!label) return null;
-  const t = label.trim().toLowerCase();
-  if (!t || t.length > 32) return null;
+export function clickSignature(fp: Fingerprint | undefined): string | null {
+  if (!fp) return null;
+  // testid is the most stable identity — prefer it whenever the page
+  // provides one. Same testid on different pages = same UI element.
+  if (fp.testid) {
+    const t = fp.testid.trim().toLowerCase();
+    if (t.length >= SIGNATURE_MIN_LEN && t.length <= SIGNATURE_MAX_LEN) {
+      return `testid:${t}`;
+    }
+  }
+  // Fall back to accessibleName, then visible text.
+  const raw = (fp.accessibleName || fp.text || "").trim();
+  if (!raw) return null;
+  const norm = raw.replace(/\s+/g, " ").toLowerCase();
+  if (norm.length < SIGNATURE_MIN_LEN) return null;
+  if (norm.length > SIGNATURE_MAX_LEN) return null;
+  return `label:${norm}`;
+}
 
-  // bookmark / unbookmark
-  if (/^bookmark(ed|s)?$/.test(t)) return "bookmark";
-  // save / saved (NOT "save changes", "save as ...")
-  if (/^save(d|s)?$/.test(t)) return "save";
-  // like / liked / unlike (NOT "i like this")
-  if (/^(un)?like(d|s)?$/.test(t)) return "like";
-  // follow / unfollow / following
-  if (/^(un)?follow(ed|ing|s)?$/.test(t)) return "follow";
-  // subscribe / unsubscribe / subscribed
-  if (/^(un)?subscribe(d|s)?$/.test(t)) return "subscribe";
-  // add to cart/bag/wishlist/list
-  if (/^add to (cart|bag|wishlist|list)$/.test(t)) return "add-to-cart";
-  if (/^add$/.test(t)) return null; // too noisy by itself
-  // wishlist / wishlisted
-  if (/^wishlist(ed)?$/.test(t)) return "wishlist";
-  // star / starred / unstar (GitHub etc.)
-  if (/^(un)?star(red|s)?$/.test(t)) return "star";
-  // watch / watching / unwatch (GitHub etc.)
-  if (/^(un)?watch(ed|ing|s)?$/.test(t)) return "watch";
-  // favorite / favorited / favourite / favourited
-  if (/^favou?rite(d|s)?$/.test(t)) return "favorite";
-  // rsvp / going / attending / interested
-  if (/^rsvp$/.test(t)) return "rsvp";
-  if (/^going$/.test(t)) return "rsvp";
-  if (/^attend(ing)?$/.test(t)) return "rsvp";
-  if (/^interested$/.test(t)) return "rsvp";
-  // pin / pinned
-  if (/^(un)?pin(ned|s)?$/.test(t)) return "pin";
-  // upvote / downvote
-  if (/^(up|down)vote(d|s)?$/.test(t)) return "vote";
-
-  return null;
+/** Pretty-print a signature for human display (strips the kind prefix). */
+function prettySignature(sig: string): string {
+  const idx = sig.indexOf(":");
+  return idx === -1 ? sig : sig.slice(idx + 1);
 }
 
 export interface DetectInput {
@@ -199,16 +199,20 @@ export function detectTriggers(input: DetectInput): Trigger[] {
         richness: rich,
       });
     }
+  }
 
-    // 4. Repetition — same pageKey cluster ≥ N distinct URLs in window.
-    if (
-      dwell &&
-      (rich.tier === "high-value" || rich.tier === "content") &&
-      dwell.foregroundMs >= DWELL_CONTENT_FOREGROUND_MS
-    ) {
-      const rep = detectRepetition(event, input.history, input.recentlyFiredRepetitionClusters);
-      if (rep) out.push(rep);
-    }
+  // 4. Repetition — same pageKey cluster ≥ N distinct URLs in window.
+  //    Runs on every page-dwell and on every nav that has page context
+  //    (the post-load / SPA-settled snapshot, NOT the bare webNavigation
+  //    notifications). NO richness or duration gate — pure URL-pattern
+  //    clustering. The LLM judges whether the pattern is meaningful;
+  //    the 7-day per-cluster throttle in ingest prevents refires.
+  if (
+    event.kind === "page-dwell" ||
+    (event.kind === "nav" && event.pageContext)
+  ) {
+    const rep = detectRepetition(event, input.history, input.recentlyFiredRepetitionClusters);
+    if (rep) out.push(rep);
   }
 
   // 5. Action-click — curated action verb on same host repeated.
@@ -256,37 +260,38 @@ function detectActionClick(
   history: AppEvent[],
   recentlyFired: Set<string>,
 ): Trigger | null {
-  const fp = event.fingerprint;
-  if (!fp) return null;
-  const label = (fp.accessibleName || fp.text || "").trim();
-  const verb = matchActionVerb(label);
-  if (!verb) return null;
+  const sig = clickSignature(event.fingerprint);
+  if (!sig) return null;
 
   const host = hostOfPageKey(event.pageKey);
   if (!host) return null;
 
-  const cluster = `${host}:${verb}`;
+  const cluster = `${host}::${sig}`;
   if (recentlyFired.has(cluster)) return null;
 
   const cutoffTs = event.ts - ACTION_CLICK_WINDOW_MS;
-  let count = 1; // this event itself
+  let count = 1;
+  let lastCountedTs = event.ts;
   for (const e of history) {
     if (e.id === event.id) continue;
     if (e.ts < cutoffTs) break;
     if (e.kind !== "click") continue;
     if (hostOfPageKey(e.pageKey) !== host) continue;
-    const efp = e.fingerprint;
-    if (!efp) continue;
-    const elabel = (efp.accessibleName || efp.text || "").trim();
-    if (matchActionVerb(elabel) !== verb) continue;
+    if (clickSignature(e.fingerprint) !== sig) continue;
+    // Drop near-duplicate clicks (capture-phase double-fire on the same UI).
+    if (Math.abs(lastCountedTs - e.ts) < ACTION_CLICK_MIN_GAP_MS) {
+      lastCountedTs = e.ts;
+      continue;
+    }
     count++;
+    lastCountedTs = e.ts;
   }
 
   if (count < ACTION_CLICK_MIN_COUNT) return null;
 
   return {
     reason: "action-click",
-    note: `${count} "${verb}" actions on ${host} within ${Math.round(ACTION_CLICK_WINDOW_MS / 60_000)} min`,
+    note: `${count} clicks on "${prettySignature(sig)}" at ${host} within ${Math.round(ACTION_CLICK_WINDOW_MS / 60_000)} min`,
     clusterKey: cluster,
   };
 }
@@ -303,7 +308,6 @@ function secs(ms: number): number {
 export const _internals = {
   TERMINAL_PATH_RE,
   DWELL_HIGH_VALUE_FOREGROUND_MS,
-  DWELL_CONTENT_FOREGROUND_MS,
   DWELL_ENGAGED_FOREGROUND_MS,
   DWELL_ENGAGED_MIN_SCROLL_PCT,
   DWELL_ENGAGED_MIN_INTERACTIONS,
@@ -311,5 +315,6 @@ export const _internals = {
   REPETITION_MIN_DISTINCT_URLS,
   ACTION_CLICK_WINDOW_MS,
   ACTION_CLICK_MIN_COUNT,
+  ACTION_CLICK_MIN_GAP_MS,
 };
 

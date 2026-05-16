@@ -29,7 +29,7 @@
 import { makeLog } from "../lib/log";
 import { newId } from "../lib/ids";
 import { getEventStore, getCompletionStore } from "../lib/store";
-import { detectTriggers, matchActionVerb, type Trigger } from "../lib/completion/detect";
+import { detectTriggers, clickSignature, type Trigger } from "../lib/completion/detect";
 import { buildLookback } from "../lib/completion/lookback";
 import { hasOpenAiKey } from "../lib/settings";
 import { judgeCandidate } from "../lib/openai";
@@ -198,8 +198,13 @@ function buildActionClickContext(
   history: AppEvent[],
   clusterKey: string,
 ): AppEvent[] {
-  const [host, verb] = clusterKey.split(":", 2);
-  if (!host || !verb) return [event];
+  // clusterKey shape: `${host}::${signature}` (signature itself contains a
+  // single colon, e.g. "label:save recipe" or "testid:bookmark-btn").
+  const sepIdx = clusterKey.indexOf("::");
+  if (sepIdx === -1) return [event];
+  const host = clusterKey.slice(0, sepIdx);
+  const sig = clusterKey.slice(sepIdx + 2);
+  if (!host || !sig) return [event];
 
   const cutoffTs = event.ts - ACTION_CLICK_CONTEXT_WINDOW_MS;
   const picked: AppEvent[] = [];
@@ -209,8 +214,7 @@ function buildActionClickContext(
     const h = e.pageKey.split("/")[0];
     if (h !== host) continue;
     if (e.kind === "click") {
-      const label = (e.fingerprint?.accessibleName || e.fingerprint?.text || "").trim();
-      if (matchActionVerb(label) !== verb) continue;
+      if (clickSignature(e.fingerprint) !== sig) continue;
       picked.push(e);
     } else if (e.kind === "page-dwell" || e.kind === "nav") {
       picked.push(e);
@@ -270,8 +274,8 @@ async function loadRecentRepetitionClusters(): Promise<Set<string>> {
 }
 
 /**
- * Same idea for action-click — derive `${host}:${verb}` from each recent
- * action-click candidate's trigger event.
+ * Same idea for action-click — derive `${host}::${signature}` from each
+ * recent action-click candidate's trigger event.
  */
 async function loadRecentActionClusters(): Promise<Set<string>> {
   const recent = await completions.recent(200);
@@ -282,10 +286,9 @@ async function loadRecentActionClusters(): Promise<Set<string>> {
     if (c.detectedAt < cutoffTs) continue;
     const host = c.trigger.pageKey.split("/")[0];
     if (!host) continue;
-    const label = (c.trigger.fingerprint?.accessibleName || c.trigger.fingerprint?.text || "").trim();
-    const verb = matchActionVerb(label);
-    if (!verb) continue;
-    out.add(`${host}:${verb}`);
+    const sig = clickSignature(c.trigger.fingerprint);
+    if (!sig) continue;
+    out.add(`${host}::${sig}`);
   }
   return out;
 }
