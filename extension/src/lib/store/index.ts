@@ -10,7 +10,7 @@
 // We deliberately keep the API tiny. Add operations only when something
 // needs them.
 
-import type { AppEvent } from "../types";
+import type { AppEvent, CompletionCandidate } from "../types";
 
 export interface EventStore {
   append(event: AppEvent): Promise<void>;
@@ -20,12 +20,28 @@ export interface EventStore {
   count(): Promise<number>;
 }
 
-import { IdbEventStore } from "./idb";
+export interface CompletionStore {
+  append(c: CompletionCandidate): Promise<void>;
+  update(c: CompletionCandidate): Promise<void>;
+  get(id: string): Promise<CompletionCandidate | undefined>;
+  recent(limit: number): Promise<CompletionCandidate[]>;
+  delete(id: string): Promise<void>;
+  clear(): Promise<void>;
+  count(): Promise<number>;
+}
 
-let _store: EventStore | null = null;
+import { IdbEventStore, IdbCompletionStore } from "./idb";
+
+let _events: EventStore | null = null;
+let _completions: CompletionStore | null = null;
 
 /** Singleton accessor — every caller in the bg context shares one connection. */
 export function getEventStore(): EventStore {
-  if (!_store) _store = new IdbEventStore();
-  return _store;
+  if (!_events) _events = new IdbEventStore();
+  return _events;
+}
+
+export function getCompletionStore(): CompletionStore {
+  if (!_completions) _completions = new IdbCompletionStore();
+  return _completions;
 }

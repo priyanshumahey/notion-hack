@@ -1,20 +1,27 @@
 // Content script. Runs in the page context of every URL.
 //
-// Responsibilities (this step):
+// Responsibilities:
 //   1. Capture user interactions: click, submit, input-edited.
 //   2. Capture SPA navigations (history.pushState/replaceState + popstate).
 //   3. Build a fingerprint for the target element.
-//   4. Post each event to the background SW via the typed message channel.
+//   4. Capture a structured page-context snapshot on nav + submit, and a
+//      form-context snapshot on submit. See lib/page-context.ts.
+//   5. Track engagement (foreground time, scroll, interactions) and emit
+//      a `page-dwell` event on visibility-hide / SPA nav / page-hide.
+//      See lib/dwell.ts.
+//   6. Post each event to the background SW via the typed message channel.
 //
-// We deliberately do NOT touch input values. Only the fact that an input was
-// edited, and a fingerprint of which input it was.
+// We do NOT touch input values per keystroke — only at submit time, and
+// only via the form-context path (which excludes passwords).
 
 import { makeLog } from "../lib/log";
 import { canonicalizeUrl } from "../lib/canonicalize";
 import { fingerprintOf } from "../lib/fingerprint";
 import { send } from "../lib/messages";
 import { newId } from "../lib/ids";
-import type { RawEvent, Fingerprint } from "../lib/types";
+import { capturePageContext, captureFormContext } from "../lib/page-context";
+import { DwellTracker, type DwellSnapshot } from "../lib/dwell";
+import type { RawEvent, Fingerprint, PageContext, FormContext, DwellMeta } from "../lib/types";
 
 const log = makeLog("content");
 
@@ -29,8 +36,30 @@ if ((window as unknown as { __nhInstalled?: boolean }).__nhInstalled) {
 function install() {
   log("loaded on", location.href);
 
+  // ---- dwell tracker (one per URL) --------------------------------------
+  let tracker = new DwellTracker(location.href, canonicalizeUrl(location.href));
+
+  function flushDwell(reason: DwellMeta["reason"]) {
+    const snap = tracker.flush(reason);
+    if (snap) emitDwell(snap);
+  }
+
+  function rotateTracker(newUrl: string) {
+    // Emit the previous page's dwell BEFORE we move on.
+    flushDwell("spa-nav");
+    tracker = new DwellTracker(newUrl, canonicalizeUrl(newUrl));
+  }
+
   // ---- helpers ----------------------------------------------------------
-  function emit(kind: RawEvent["kind"], fingerprint?: Fingerprint, meta?: Record<string, unknown>) {
+  function emit(
+    kind: RawEvent["kind"],
+    fingerprint?: Fingerprint,
+    extras?: {
+      pageContext?: PageContext;
+      formContext?: FormContext;
+      meta?: Record<string, unknown>;
+    },
+  ) {
     const url = location.href;
     const ev: RawEvent = {
       id: newId(),
@@ -39,24 +68,50 @@ function install() {
       pageKey: canonicalizeUrl(url),
       kind,
       fingerprint,
-      meta,
+      pageContext: extras?.pageContext,
+      formContext: extras?.formContext,
+      meta: extras?.meta,
     };
     log(kind, ev);
     void send({ t: "evt", event: ev });
   }
 
+  function emitDwell(snap: DwellSnapshot) {
+    const ev: RawEvent = {
+      id: newId(),
+      ts: Date.now(),
+      url: snap.url,
+      pageKey: snap.pageKey,
+      kind: "page-dwell",
+      pageContext: snap.pageContext,
+      meta: snap.meta as unknown as Record<string, unknown>,
+    };
+    log("page-dwell", ev);
+    void send({ t: "evt", event: ev });
+  }
+
+  /** Best-effort page-context capture. Never throws; returns undefined on hard failure. */
+  function safeCapturePage(): PageContext | undefined {
+    try {
+      return capturePageContext();
+    } catch (e) {
+      log.error("page-context capture failed", e);
+      return undefined;
+    }
+  }
+
   // ---- click ------------------------------------------------------------
-  // Use capture-phase + passive listener so we always observe, even if the
-  // page calls stopPropagation on its own handlers.
   window.addEventListener(
     "click",
     (e) => {
+      tracker.recordInteraction();
       const fp = fingerprintOf(e.target, location.href);
-      // Skip clicks on raw text / non-interactive nodes that produce no fp.
       if (!fp) return;
       emit("click", fp, {
-        button: (e as MouseEvent).button,
-        modifiers: modifiers(e as MouseEvent),
+        meta: {
+          button: (e as MouseEvent).button,
+          modifiers: modifiers(e as MouseEvent),
+        },
       });
     },
     { capture: true, passive: true },
@@ -66,15 +121,26 @@ function install() {
   window.addEventListener(
     "submit",
     (e) => {
-      const fp = fingerprintOf(e.target, location.href);
-      emit("submit", fp);
+      tracker.recordInteraction();
+      const target = e.target;
+      const fp = fingerprintOf(target, location.href);
+      let formContext: FormContext | undefined;
+      if (target instanceof HTMLFormElement) {
+        try {
+          formContext = captureFormContext(target);
+        } catch (err) {
+          log.error("form-context capture failed", err);
+        }
+      }
+      emit("submit", fp, {
+        pageContext: safeCapturePage(),
+        formContext,
+      });
     },
     { capture: true, passive: true },
   );
 
   // ---- input-edited (debounced) -----------------------------------------
-  // We don't capture keystrokes; we just want one event per logical "I
-  // edited this field". Debounce per element identity.
   const inputDebounce = new WeakMap<Element, number>();
   const INPUT_DEBOUNCE_MS = 800;
   window.addEventListener(
@@ -86,6 +152,7 @@ function install() {
       if (prev) clearTimeout(prev);
       const handle = window.setTimeout(() => {
         inputDebounce.delete(el);
+        tracker.recordInteraction();
         const fp = fingerprintOf(el, location.href);
         if (!fp) return;
         emit("input-edited", fp);
@@ -95,34 +162,96 @@ function install() {
     { capture: true, passive: true },
   );
 
-  // ---- SPA navigations --------------------------------------------------
-  // chrome.webNavigation in the bg sees pushState commits, but ALSO firing a
-  // nav event from the content side gives us a same-frame ordering guarantee
-  // relative to clicks. The bg de-dupes by id+url+kind in a future step.
-  let lastUrl = location.href;
-  function checkUrlChange(source: string) {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      emit("nav", undefined, { source });
+  // ---- scroll (throttled by rAF) ----------------------------------------
+  let scrollPending = false;
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (scrollPending) return;
+      scrollPending = true;
+      requestAnimationFrame(() => {
+        scrollPending = false;
+        tracker.recordScroll();
+      });
+    },
+    { capture: true, passive: true },
+  );
+
+  // ---- visibility / page lifecycle --------------------------------------
+  document.addEventListener("visibilitychange", () => {
+    tracker.onVisibilityChange();
+    if (document.hidden) {
+      // Tab going to background or being closed — best chance to emit.
+      flushDwell("visibility-hidden");
     }
+  });
+  // pagehide is more reliable than unload on modern browsers, fires on
+  // bfcache eviction too. Last call to flush.
+  window.addEventListener("pagehide", () => {
+    flushDwell("page-hide");
+  });
+
+  // ---- SPA navigations --------------------------------------------------
+  let lastUrl = location.href;
+  let pendingSettleTimer: number | null = null;
+  let pendingSettleUrl: string | null = null;
+  const SETTLE_MS = 700;
+
+  function onUrlMaybeChanged(source: string) {
+    if (location.href === lastUrl) return;
+    const oldUrl = lastUrl;
+    lastUrl = location.href;
+    // 1) Flush dwell for the page we just left, start a fresh tracker for
+    //    the new URL.
+    rotateTracker(location.href);
+    log("spa nav", oldUrl, "→", location.href);
+    // 2) Emit immediate "early" nav (no context yet).
+    emit("nav", undefined, { meta: { source: source + "-early" } });
+    // 3) Schedule settled snapshot.
+    if (pendingSettleTimer != null) clearTimeout(pendingSettleTimer);
+    pendingSettleUrl = location.href;
+    pendingSettleTimer = window.setTimeout(() => {
+      pendingSettleTimer = null;
+      if (location.href !== pendingSettleUrl) return;
+      emit("nav", undefined, {
+        pageContext: safeCapturePage(),
+        meta: { source: source + "-settled" },
+      });
+    }, SETTLE_MS);
   }
+
   const wrap = (name: "pushState" | "replaceState") => {
     const original = history[name];
     history[name] = function (this: History, ...args: Parameters<History["pushState"]>) {
       const ret = original.apply(this, args);
-      // Defer one microtask so location.href reflects the new URL.
-      queueMicrotask(() => checkUrlChange(name));
+      queueMicrotask(() => onUrlMaybeChanged(name));
       return ret;
     } as History[typeof name];
   };
   wrap("pushState");
   wrap("replaceState");
-  window.addEventListener("popstate", () => checkUrlChange("popstate"));
-  window.addEventListener("hashchange", () => checkUrlChange("hashchange"));
+  window.addEventListener("popstate", () => onUrlMaybeChanged("popstate"));
+  window.addEventListener("hashchange", () => onUrlMaybeChanged("hashchange"));
 
-  // Emit one nav event for the initial page load too, so the recent log
-  // always has a "you started here" anchor per tab.
-  emit("nav", undefined, { source: "initial" });
+  // ---- Initial load -----------------------------------------------------
+  function emitInitialNav() {
+    emit("nav", undefined, {
+      pageContext: safeCapturePage(),
+      meta: { source: "initial" },
+    });
+  }
+  if (document.readyState === "complete") {
+    emitInitialNav();
+  } else {
+    let emitted = false;
+    const fire = () => {
+      if (emitted) return;
+      emitted = true;
+      emitInitialNav();
+    };
+    window.addEventListener("load", fire, { once: true });
+    window.setTimeout(fire, 3000);
+  }
 }
 
 function modifiers(e: MouseEvent): string[] {

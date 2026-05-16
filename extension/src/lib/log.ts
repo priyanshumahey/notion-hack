@@ -2,7 +2,7 @@
 // Usage: const log = makeLog("content"); log("clicked", { ... });
 // Filter in DevTools console: regex `\[nh:.*\]`.
 
-type Scope = "content" | "bg" | "popup" | "store" | "capture" | "nav";
+type Scope = "content" | "bg" | "popup" | "store" | "capture" | "nav" | "dwell";
 
 export function makeLog(scope: Scope) {
   const tag = `[nh:${scope}]`;

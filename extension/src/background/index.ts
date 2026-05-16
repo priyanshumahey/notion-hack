@@ -1,25 +1,29 @@
 // MV3 service worker. Owns the IndexedDB store and routes typed messages.
 //
-// Responsibilities (this step):
-//   - Receive `evt` messages from content scripts, stamp tabId, persist.
-//   - Listen to chrome.webNavigation.onCommitted as a fallback nav source
-//     (covers cross-origin navigations, new tabs, etc.).
-//   - Serve `getRecent`, `clearAll`, `ping` queries from the popup.
+// Step 2: the heavy lifting moved into ingest.ts. This file is now mostly a
+// router. Detection + LLM judge run inside ingest() for every event.
 //
 // Debug from the SW console:
 //   await __nh.recent(20)
 //   await __nh.count()
+//   await __nh.completions(20)
+//   await __nh.completionCount()
 //   await __nh.clear()
+//   await __nh.clearCompletions()
 
 import { makeLog } from "../lib/log";
-import { getEventStore } from "../lib/store";
+import { getEventStore, getCompletionStore } from "../lib/store";
 import { canonicalizeUrl } from "../lib/canonicalize";
 import { newId } from "../lib/ids";
+import { ingest, retryJudge } from "./ingest";
+import { describeKeySource, hasOpenAiKey, redactKey, setOpenAiKey, getOpenAiKey } from "../lib/settings";
+import { pingOpenAi } from "../lib/openai";
 import type { Msg, MsgResponse } from "../lib/messages";
 import type { AppEvent, RawEvent } from "../lib/types";
 
 const log = makeLog("bg");
-const store = getEventStore();
+const events = getEventStore();
+const completions = getCompletionStore();
 
 chrome.runtime.onInstalled.addListener((details) => {
   log("installed", details.reason);
@@ -30,11 +34,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 // ---- Cross-origin nav fallback ---------------------------------------------
-// content scripts can't observe a navigation that unloads them. webNavigation
-// in the bg picks up the next page's commit so we get a clean nav event
-// regardless of where the user went.
 chrome.webNavigation.onCommitted.addListener((details) => {
-  // Only main frame, only http(s).
   if (details.frameId !== 0) return;
   if (!/^https?:/.test(details.url)) return;
 
@@ -47,7 +47,7 @@ chrome.webNavigation.onCommitted.addListener((details) => {
     kind: "nav",
     meta: { source: "webNavigation", transitionType: details.transitionType },
   };
-  void persist(ev);
+  void ingest(ev).catch((e) => log.error("ingest(nav) failed", e));
 });
 
 // ---- Message router --------------------------------------------------------
@@ -59,7 +59,6 @@ chrome.runtime.onMessage.addListener(
         log.error("handler threw", e);
         sendResponse({ t: "error", message: (e as Error).message });
       });
-    // Tell chrome we'll respond asynchronously.
     return true;
   },
 );
@@ -69,17 +68,53 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
     case "evt": {
       const tabId = sender.tab?.id ?? -1;
       const ev = stampRaw(msg.event, tabId);
-      await persist(ev);
+      await ingest(ev);
       return { t: "ok" };
     }
     case "getRecent": {
-      const events = await store.recent(msg.limit);
-      return { t: "recent", events };
+      const evts = await events.recent(msg.limit);
+      return { t: "recent", events: evts };
     }
     case "clearAll": {
-      await store.clear();
+      await events.clear();
       log.warn("cleared all events");
       return { t: "ok" };
+    }
+    case "getCompletions": {
+      const list = await completions.recent(msg.limit);
+      return { t: "completions", completions: list };
+    }
+    case "getCompletion": {
+      const c = (await completions.get(msg.id)) ?? null;
+      return { t: "completion", completion: c };
+    }
+    case "retryJudge": {
+      const c = await retryJudge(msg.id);
+      return { t: "completion", completion: c };
+    }
+    case "deleteCompletion": {
+      await completions.delete(msg.id);
+      return { t: "ok" };
+    }
+    case "clearCompletions": {
+      await completions.clear();
+      log.warn("cleared all completions");
+      return { t: "ok" };
+    }
+    case "getKeyStatus": {
+      const source = await describeKeySource();
+      const hasKey = source !== "none";
+      const redacted = hasKey ? redactKey(await getOpenAiKey()) : "";
+      return { t: "keyStatus", hasKey, source, redacted };
+    }
+    case "setOpenAiKey": {
+      await setOpenAiKey(msg.key);
+      log("openai key updated; hasKey=", await hasOpenAiKey());
+      return { t: "ok" };
+    }
+    case "testOpenAi": {
+      const r = await pingOpenAi();
+      return { t: "testResult", ok: r.ok, error: r.error };
     }
     case "ping":
       return { t: "pong", at: Date.now() };
@@ -95,30 +130,18 @@ function stampRaw(raw: RawEvent, tabId: number): AppEvent {
     pageKey: raw.pageKey,
     kind: raw.kind,
     fingerprint: raw.fingerprint,
+    pageContext: raw.pageContext,
+    formContext: raw.formContext,
     meta: raw.meta,
   };
 }
 
-async function persist(ev: AppEvent): Promise<void> {
-  try {
-    await store.append(ev);
-    log(ev.kind, ev.pageKey, summarize(ev));
-  } catch (e) {
-    log.error("persist failed", e, ev);
-  }
-}
-
-function summarize(ev: AppEvent): string {
-  const fp = ev.fingerprint;
-  if (!fp) return "";
-  const label = fp.accessibleName || fp.text || fp.testid || fp.role || fp.tag;
-  return `${fp.role ?? fp.tag}:${JSON.stringify(label).slice(0, 60)}`;
-}
-
 // ---- Debug surface in the SW console --------------------------------------
-// `globalThis.__nh.recent(20)` etc. — handy while we have no real UI yet.
 (globalThis as unknown as { __nh: unknown }).__nh = {
-  recent: (n = 50) => store.recent(n),
-  count: () => store.count(),
-  clear: () => store.clear(),
+  recent: (n = 50) => events.recent(n),
+  count: () => events.count(),
+  clear: () => events.clear(),
+  completions: (n = 50) => completions.recent(n),
+  completionCount: () => completions.count(),
+  clearCompletions: () => completions.clear(),
 };
