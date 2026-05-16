@@ -34,14 +34,6 @@ const IS_TOP_FRAME = (() => {
   }
 })();
 
-// Guard against double-injection (HMR / re-injection after install).
-if ((window as unknown as { __nhInstalled?: boolean }).__nhInstalled) {
-  log.warn("content script already installed on this page, skipping");
-} else {
-  (window as unknown as { __nhInstalled?: boolean }).__nhInstalled = true;
-  install();
-}
-
 function install() {
   log("loaded on", location.href);
 
@@ -329,43 +321,64 @@ function mountAgentPanel() {
 
   const root = document.createElement("section");
   root.id = AGENT_PANEL_ROOT_ID;
-  root.setAttribute("aria-label", "Agent orchestrator");
+  root.setAttribute("aria-label", "Agent panel");
   root.tabIndex = 0;
   root.innerHTML = `
     <div class="nh-agent-collapsed" aria-hidden="true">
       <span class="nh-agent-dot"></span>
     </div>
     <div class="nh-agent-expanded" aria-hidden="true">
-      <div class="nh-agent-header">
-        <div class="nh-agent-title-row">
-          <span class="nh-agent-status-dot"></span>
-          <span class="nh-agent-title">Orchestrator</span>
+      <header class="nh-panel-header">
+        <div class="nh-panel-title">
+          <span class="nh-panel-dot"></span>
+          <span class="nh-panel-name">Coordinator</span>
         </div>
-        <span class="nh-agent-status">3 running</span>
+        <span class="nh-panel-badge">orchestrating</span>
+      </header>
+
+      <div class="nh-panel-summary">Monitoring agent progress...</div>
+
+      <div class="nh-agent-rows">
+        <div class="nh-agent-tree" aria-hidden="true"></div>
+
+        <div class="nh-agent-row">
+          <div class="nh-agent-row-top">
+            <span class="nh-agent-row-label">
+              <span class="nh-row-dot is-green"></span>
+              <span class="nh-row-name">Auth Agent</span>
+            </span>
+            <span class="nh-row-file">jwt-service.ts</span>
+          </div>
+          <div class="nh-agent-row-task">Signing with RS256...</div>
+        </div>
+
+        <div class="nh-agent-row">
+          <div class="nh-agent-row-top">
+            <span class="nh-agent-row-label">
+              <span class="nh-row-dot is-blue"></span>
+              <span class="nh-row-name">API Agent</span>
+            </span>
+            <span class="nh-row-file">routes/auth.ts</span>
+          </div>
+          <div class="nh-agent-row-task">Validating headers...</div>
+        </div>
+
+        <div class="nh-agent-row">
+          <div class="nh-agent-row-top">
+            <span class="nh-agent-row-label">
+              <span class="nh-row-dot is-purple"></span>
+              <span class="nh-row-name">Test Agent</span>
+            </span>
+            <span class="nh-row-file">auth.test.ts</span>
+          </div>
+          <div class="nh-agent-row-task">Mocking responses...</div>
+        </div>
       </div>
-      <div class="nh-agent-list">
-        <div class="nh-agent-row">
-          <div class="nh-agent-row-top">
-            <span class="nh-agent-name"><span class="nh-agent-row-dot is-green"></span>Auth Agent</span>
-            <span class="nh-agent-file">jwt-service.ts</span>
-          </div>
-          <div class="nh-agent-task">Signing with RS256...</div>
-        </div>
-        <div class="nh-agent-row">
-          <div class="nh-agent-row-top">
-            <span class="nh-agent-name"><span class="nh-agent-row-dot is-blue"></span>API Agent</span>
-            <span class="nh-agent-file">routes/auth.ts</span>
-          </div>
-          <div class="nh-agent-task">Validating headers...</div>
-        </div>
-        <div class="nh-agent-row">
-          <div class="nh-agent-row-top">
-            <span class="nh-agent-name"><span class="nh-agent-row-dot is-purple"></span>Test Agent</span>
-            <span class="nh-agent-file">auth.test.ts</span>
-          </div>
-          <div class="nh-agent-task">Mocking responses...</div>
-        </div>
-      </div>
+
+      <footer class="nh-panel-footer">
+        <span class="nh-footer-glyph">&#8596;</span>
+        <span class="nh-footer-line">All agents synced to <span class="nh-footer-target">auth-refactor.md</span></span>
+      </footer>
     </div>
   `;
   mountTarget.appendChild(root);
@@ -378,23 +391,39 @@ function isAgentPanelEvent(e: Event): boolean {
 
 const AGENT_PANEL_CSS = `
 #${AGENT_PANEL_ROOT_ID} {
+  --nh-bg: #0a0d12;
+  --nh-border: rgba(255, 255, 255, 0.05);
+  --nh-divider: rgba(255, 255, 255, 0.06);
+  --nh-green: #22c55e;
+  --nh-green-soft: rgba(34, 197, 94, 0.13);
+  --nh-green-line: rgba(34, 197, 94, 0.55);
+  --nh-text: #f1f4f8;
+  --nh-text-muted: #6b7280;
+  --nh-text-dim: #7a8290;
+
   position: fixed;
-  right: 18px;
-  bottom: 18px;
-  width: 46px;
-  height: 46px;
+  right: 24px;
+  top: 24px;
+  width: 52px;
+  height: 52px;
   z-index: 2147483647;
   box-sizing: border-box;
-  border: 1px solid rgba(47, 140, 255, 0.18);
+  border: 1px solid var(--nh-border);
   border-radius: 14px;
-  background: #101318;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.03);
-  color: #eef3f8;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--nh-bg);
+  box-shadow:
+    0 20px 50px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.02);
+  color: var(--nh-text);
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", "Geist Mono", "Roboto Mono", Consolas, monospace;
   overflow: hidden;
   pointer-events: auto;
   user-select: none;
-  transition: width 180ms ease, height 180ms ease, border-radius 180ms ease, box-shadow 180ms ease;
+  transition:
+    width 220ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    height 220ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-radius 220ms ease,
+    box-shadow 220ms ease;
 }
 
 #${AGENT_PANEL_ROOT_ID},
@@ -405,10 +434,13 @@ const AGENT_PANEL_CSS = `
 #${AGENT_PANEL_ROOT_ID}:hover,
 #${AGENT_PANEL_ROOT_ID}:focus,
 #${AGENT_PANEL_ROOT_ID}:focus-within {
-  width: 292px;
-  height: 178px;
-  border-radius: 16px;
-  box-shadow: 0 22px 58px rgba(0, 0, 0, 0.36), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  width: 560px;
+  height: 340px;
+  border-radius: 18px;
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(255, 255, 255, 0.03);
   outline: none;
 }
 
@@ -427,17 +459,24 @@ const AGENT_PANEL_CSS = `
 }
 
 #${AGENT_PANEL_ROOT_ID} .nh-agent-dot {
-  width: 16px;
-  height: 16px;
-  border-radius: 6px;
-  background: #2f8cff;
-  box-shadow: 0 0 0 6px rgba(47, 140, 255, 0.12);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--nh-green);
+  box-shadow: 0 0 0 5px var(--nh-green-soft);
 }
 
 #${AGENT_PANEL_ROOT_ID} .nh-agent-expanded {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 32px 22px;
   opacity: 0;
   transform: translateY(6px);
-  transition: opacity 140ms ease 55ms, transform 140ms ease 55ms;
+  transition:
+    opacity 180ms ease 80ms,
+    transform 180ms ease 80ms;
 }
 
 #${AGENT_PANEL_ROOT_ID}:hover .nh-agent-expanded,
@@ -447,141 +486,192 @@ const AGENT_PANEL_CSS = `
   transform: translateY(0);
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-header {
+#${AGENT_PANEL_ROOT_ID} .nh-panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 13px 14px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  gap: 16px;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-title-row {
+#${AGENT_PANEL_ROOT_ID} .nh-panel-title {
   display: flex;
   align-items: center;
+  gap: 14px;
   min-width: 0;
-  gap: 8px;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-status-dot {
+#${AGENT_PANEL_ROOT_ID} .nh-panel-dot {
   flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
-  background: #20c76f;
-  box-shadow: 0 0 0 3px rgba(32, 199, 111, 0.12);
+  background: var(--nh-green);
+  box-shadow: 0 0 0 4px var(--nh-green-soft);
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-title {
+#${AGENT_PANEL_ROOT_ID} .nh-panel-name {
   overflow: hidden;
-  color: #f4f4f4;
-  font-size: 13px;
+  color: var(--nh-text);
+  font-size: 18px;
   line-height: 1;
-  font-weight: 650;
+  font-weight: 700;
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-status {
+#${AGENT_PANEL_ROOT_ID} .nh-panel-badge {
   display: inline-flex;
   align-items: center;
-  max-width: 96px;
-  height: 22px;
-  padding: 0 8px;
+  height: 24px;
+  padding: 0 10px;
   border-radius: 6px;
-  background: rgba(47, 140, 255, 0.13);
-  color: #87bfff;
-  font-size: 10px;
+  background: var(--nh-green-soft);
+  color: #4ade80;
+  font-size: 12px;
   line-height: 1;
-  font-weight: 650;
+  font-weight: 500;
   letter-spacing: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-list {
-  display: grid;
-  gap: 0;
-  padding: 4px 8px 8px;
+#${AGENT_PANEL_ROOT_ID} .nh-panel-summary {
+  margin: 14px 0 0 25px;
+  color: var(--nh-text-muted);
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-rows {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  margin-top: 18px;
+  padding-left: 26px;
+  min-height: 0;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-agent-tree {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  bottom: 8px;
+  width: 1.5px;
+  background: var(--nh-green-line);
+  border-radius: 1px;
+  pointer-events: none;
 }
 
 #${AGENT_PANEL_ROOT_ID} .nh-agent-row {
+  position: relative;
   min-width: 0;
-  padding: 8px 6px;
-  border-radius: 9px;
-}
-
-#${AGENT_PANEL_ROOT_ID} .nh-agent-row + .nh-agent-row {
-  border-top: 1px solid rgba(255, 255, 255, 0.055);
+  padding: 2px 0;
 }
 
 #${AGENT_PANEL_ROOT_ID} .nh-agent-row-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 5px;
+  gap: 14px;
+  margin-bottom: 6px;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-name {
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row-label {
   display: inline-flex;
   align-items: center;
+  gap: 12px;
   min-width: 0;
-  gap: 7px;
   overflow: hidden;
-  color: #eeeeee;
-  font-size: 12px;
-  line-height: 1;
-  font-weight: 650;
-  letter-spacing: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot {
+#${AGENT_PANEL_ROOT_ID} .nh-row-dot {
   flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot.is-green {
-  background: #229653;
+#${AGENT_PANEL_ROOT_ID} .nh-row-dot.is-green {
+  background: #22c55e;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot.is-blue {
-  background: #2f7de1;
+#${AGENT_PANEL_ROOT_ID} .nh-row-dot.is-blue {
+  background: #4a8cff;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-row-dot.is-purple {
-  background: #8e47d6;
+#${AGENT_PANEL_ROOT_ID} .nh-row-dot.is-purple {
+  background: #a06bf0;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-file {
+#${AGENT_PANEL_ROOT_ID} .nh-row-name {
+  overflow: hidden;
+  color: var(--nh-text);
+  font-size: 14px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-row-file {
   flex: 0 0 auto;
   overflow: hidden;
-  max-width: 96px;
-  color: #788492;
-  font-size: 10px;
+  max-width: 200px;
+  color: var(--nh-text-dim);
+  font-size: 13px;
   line-height: 1;
-  font-weight: 500;
-  letter-spacing: 0;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#${AGENT_PANEL_ROOT_ID} .nh-agent-task {
+#${AGENT_PANEL_ROOT_ID} .nh-agent-row-task {
   overflow: hidden;
-  padding-left: 14px;
-  color: #8f99a6;
-  font-size: 11px;
-  line-height: 1;
+  padding-left: 20px;
+  color: var(--nh-text-muted);
+  font-size: 13px;
+  line-height: 1.2;
   font-weight: 400;
-  letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-panel-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--nh-divider);
+  color: var(--nh-text-muted);
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-footer-glyph {
+  flex: 0 0 auto;
+  color: var(--nh-green);
+  font-size: 14px;
+  line-height: 1;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-footer-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#${AGENT_PANEL_ROOT_ID} .nh-footer-target {
+  color: var(--nh-text);
+  font-weight: 500;
 }
 `;
 
@@ -592,4 +682,14 @@ function modifiers(e: MouseEvent): string[] {
   if (e.metaKey) m.push("meta");
   if (e.shiftKey) m.push("shift");
   return m;
+}
+
+// Guard against double-injection (HMR / re-injection after install).
+// This must run after AGENT_PANEL_CSS is initialized because install() can
+// synchronously mount the panel at document_start.
+if ((window as unknown as { __nhInstalled?: boolean }).__nhInstalled) {
+  log.warn("content script already installed on this page, skipping");
+} else {
+  (window as unknown as { __nhInstalled?: boolean }).__nhInstalled = true;
+  install();
 }
