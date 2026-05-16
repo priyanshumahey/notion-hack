@@ -71,6 +71,10 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
       await ingest(ev);
       return { t: "ok" };
     }
+    case "completionPrompt":
+      // Background emits this to content scripts; ignore if it is ever routed
+      // back through runtime.onMessage.
+      return { t: "ok" };
     case "getRecent": {
       const evts = await events.recent(msg.limit);
       return { t: "recent", events: evts };
@@ -78,6 +82,15 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
     case "clearAll": {
       await events.clear();
       log.warn("cleared all events");
+      return { t: "ok" };
+    }
+    case "setCompletionStatus": {
+      const c = await completions.get(msg.id);
+      if (c) {
+        c.status = msg.status;
+        await completions.update(c);
+        log("completion status updated", msg.id, msg.status);
+      }
       return { t: "ok" };
     }
     case "getCompletions": {

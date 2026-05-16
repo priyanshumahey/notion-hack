@@ -146,12 +146,29 @@ async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): 
       confidence: judgement.confidence,
       proposalDb: judgement.proposal?.database.name,
     });
+    if (judgement.meaningful) {
+      notifyCompletionPrompt(candidate).catch((err) => {
+        log.warn("completion prompt notify failed", candidate.id, err);
+      });
+    }
   } catch (e) {
     const msg = (e as Error).message;
     log.error("judge failed", candidate.id, msg);
     candidate.error = msg;
     await completions.update(candidate);
   }
+}
+
+async function notifyCompletionPrompt(candidate: CompletionCandidate): Promise<void> {
+  const tabId = candidate.trigger.tabId;
+  if (tabId < 0) return;
+  await chrome.tabs.sendMessage(tabId, {
+    t: "completionPrompt",
+    id: candidate.id,
+    reason: candidate.reason,
+    databaseName: candidate.judgement?.proposal?.database.name,
+    confidence: candidate.judgement?.confidence,
+  });
 }
 
 /**
@@ -316,4 +333,3 @@ export async function retryJudge(id: string): Promise<CompletionCandidate | null
 function uniq<T>(xs: T[]): T[] {
   return Array.from(new Set(xs));
 }
-

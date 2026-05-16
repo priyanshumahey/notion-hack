@@ -7,6 +7,15 @@ import type { AppEvent, CompletionCandidate } from "./types";
 export type Msg =
   // content → bg
   | { t: "evt"; event: import("./types").RawEvent }
+  | { t: "setCompletionStatus"; id: string; status: "dismissed" | "promoted" }
+  // bg → content
+  | {
+      t: "completionPrompt";
+      id: string;
+      reason: CompletionCandidate["reason"];
+      databaseName?: string;
+      confidence?: number;
+    }
   // popup → bg : events
   | { t: "getRecent"; limit: number }
   | { t: "clearAll" }

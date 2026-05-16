@@ -17,7 +17,7 @@
 import { makeLog } from "../lib/log";
 import { canonicalizeUrl } from "../lib/canonicalize";
 import { fingerprintOf } from "../lib/fingerprint";
-import { send } from "../lib/messages";
+import { send, type Msg } from "../lib/messages";
 import { newId } from "../lib/ids";
 import { capturePageContext, captureFormContext } from "../lib/page-context";
 import { DwellTracker, type DwellSnapshot } from "../lib/dwell";
@@ -26,6 +26,9 @@ import type { RawEvent, Fingerprint, PageContext, FormContext, DwellMeta } from 
 const log = makeLog("content");
 const AGENT_PANEL_ROOT_ID = "notion-hack-agent-panel-root";
 const AGENT_PANEL_STYLE_ID = "notion-hack-agent-panel-style";
+const AGENT_PANEL_ENABLED = false;
+const COMPLETION_PROMPT_ROOT_ID = "notion-hack-completion-prompt-root";
+const COMPLETION_PROMPT_STYLE_ID = "notion-hack-completion-prompt-style";
 const IS_TOP_FRAME = (() => {
   try {
     return window.self === window.top;
@@ -91,7 +94,9 @@ function install() {
     void send({ t: "evt", event: ev });
   }
 
-  if (IS_TOP_FRAME) {
+  if (IS_TOP_FRAME) installCompletionPromptListener();
+
+  if (AGENT_PANEL_ENABLED && IS_TOP_FRAME) {
     try {
       mountAgentPanel();
     } catch (e) {
@@ -114,7 +119,7 @@ function install() {
   let lastPointerAt = 0;
 
   function captureInteraction(e: MouseEvent | PointerEvent, source: "click" | "pointerdown") {
-    if (isAgentPanelEvent(e)) return;
+    if (isExtensionUiEvent(e)) return;
     if (source === "pointerdown") {
       const pe = e as PointerEvent;
       if (pe.button !== 0 || !pe.isPrimary) return;
@@ -158,7 +163,7 @@ function install() {
   window.addEventListener(
     "submit",
     (e) => {
-      if (isAgentPanelEvent(e)) return;
+      if (isExtensionUiEvent(e)) return;
       tracker.recordInteraction();
       const target = e.target;
       const fp = fingerprintOf(target, location.href);
@@ -184,7 +189,7 @@ function install() {
   window.addEventListener(
     "input",
     (e) => {
-      if (isAgentPanelEvent(e)) return;
+      if (isExtensionUiEvent(e)) return;
       const el = e.target;
       if (!(el instanceof Element)) return;
       const prev = inputDebounce.get(el);
@@ -387,6 +392,90 @@ function mountAgentPanel() {
 function isAgentPanelEvent(e: Event): boolean {
   const target = e.target;
   return target instanceof Element && !!target.closest(`#${AGENT_PANEL_ROOT_ID}`);
+}
+
+function isCompletionPromptEvent(e: Event): boolean {
+  const target = e.target;
+  return target instanceof Element && !!target.closest(`#${COMPLETION_PROMPT_ROOT_ID}`);
+}
+
+function isExtensionUiEvent(e: Event): boolean {
+  return isAgentPanelEvent(e) || isCompletionPromptEvent(e);
+}
+
+function installCompletionPromptListener() {
+  chrome.runtime.onMessage.addListener((msg: Msg) => {
+    if (msg.t !== "completionPrompt") return;
+    showCompletionPrompt(msg);
+  });
+}
+
+function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
+  document.getElementById(COMPLETION_PROMPT_ROOT_ID)?.remove();
+  if (!document.getElementById(COMPLETION_PROMPT_STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = COMPLETION_PROMPT_STYLE_ID;
+    style.textContent = COMPLETION_PROMPT_CSS;
+    document.documentElement.appendChild(style);
+  }
+
+  const root = document.createElement("section");
+  root.id = COMPLETION_PROMPT_ROOT_ID;
+  root.setAttribute("aria-label", "Repeatable interaction prompt");
+
+  const title = document.createElement("div");
+  title.className = "nh-completion-title";
+  title.textContent = "Repeatable Interaction Identified.";
+
+  const body = document.createElement("div");
+  body.className = "nh-completion-body";
+  body.textContent = "Would you like to save it";
+
+  const meta = document.createElement("div");
+  meta.className = "nh-completion-meta";
+  meta.textContent = prompt.databaseName || labelForCompletionReason(prompt.reason);
+
+  const actions = document.createElement("div");
+  actions.className = "nh-completion-actions";
+
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = "nh-completion-button is-primary";
+  yes.textContent = "Yes";
+  yes.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void send({ t: "setCompletionStatus", id: prompt.id, status: "promoted" });
+    root.remove();
+  });
+
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "nh-completion-button";
+  no.textContent = "No";
+  no.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void send({ t: "setCompletionStatus", id: prompt.id, status: "dismissed" });
+    root.remove();
+  });
+
+  actions.append(yes, no);
+  root.append(title, body, meta, actions);
+  document.documentElement.appendChild(root);
+}
+
+function labelForCompletionReason(reason: Extract<Msg, { t: "completionPrompt" }>["reason"]): string {
+  switch (reason) {
+    case "action-click":
+      return "Repeated action pattern";
+    case "repetition":
+      return "Repeated browsing pattern";
+    case "content-dwell":
+      return "Meaningful page interaction";
+    case "form-submit":
+      return "Submitted workflow";
+    case "terminal-nav":
+      return "Completed workflow";
+  }
 }
 
 const AGENT_PANEL_CSS = `
@@ -672,6 +761,93 @@ const AGENT_PANEL_CSS = `
 #${AGENT_PANEL_ROOT_ID} .nh-footer-target {
   color: var(--nh-text);
   font-weight: 500;
+}
+`;
+
+const COMPLETION_PROMPT_CSS = `
+#${COMPLETION_PROMPT_ROOT_ID} {
+  position: fixed;
+  right: 24px;
+  top: 24px;
+  z-index: 2147483647;
+  width: min(360px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: #0a0d12;
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.48),
+    0 0 0 1px rgba(255, 255, 255, 0.03);
+  color: #f1f4f8;
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", "Geist Mono", "Roboto Mono", Consolas, monospace;
+  pointer-events: auto;
+  user-select: none;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID},
+#${COMPLETION_PROMPT_ROOT_ID} * {
+  box-sizing: border-box;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-title {
+  color: #f1f4f8;
+  font-size: 15px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-body {
+  margin-top: 8px;
+  color: #a7b0bd;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 400;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-meta {
+  margin-top: 12px;
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button {
+  height: 32px;
+  min-width: 72px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #d7dde6;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button.is-primary {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.16);
+  color: #86efac;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button.is-primary:hover {
+  background: rgba(34, 197, 94, 0.22);
 }
 `;
 
