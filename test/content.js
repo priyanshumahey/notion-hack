@@ -95,13 +95,28 @@
         </div>
         <div class="bgc-agent-expanded" aria-hidden="true">
           <div class="bgc-agent-header">
-            <span class="bgc-agent-title">Agent</span>
-            <span class="bgc-agent-status">Ready</span>
+            <span class="bgc-agent-title">Agent tasks</span>
+            <span class="bgc-agent-status">62%</span>
+          </div>
+          <div class="bgc-agent-progress" aria-hidden="true">
+            <span class="bgc-agent-progress-fill"></span>
           </div>
           <div class="bgc-agent-body">
-            <button type="button" class="bgc-agent-action">Ask</button>
-            <button type="button" class="bgc-agent-action">Summarize</button>
-            <button type="button" class="bgc-agent-action">Capture</button>
+            <div class="bgc-agent-task is-done">
+              <span class="bgc-agent-check"></span>
+              <span class="bgc-agent-task-copy">Read current page</span>
+              <span class="bgc-agent-task-meta">Done</span>
+            </div>
+            <div class="bgc-agent-task is-active">
+              <span class="bgc-agent-check"></span>
+              <span class="bgc-agent-task-copy">Build context</span>
+              <span class="bgc-agent-task-meta">2/3</span>
+            </div>
+            <div class="bgc-agent-task">
+              <span class="bgc-agent-check"></span>
+              <span class="bgc-agent-task-copy">Draft answer</span>
+              <span class="bgc-agent-task-meta">Next</span>
+            </div>
           </div>
         </div>
       </section>
@@ -138,6 +153,7 @@
     document.body.appendChild(root);
     cursorEl = root.querySelector(".bgc-cursor");
     bubbleEl = root.querySelector(".bgc-bubble");
+    root.classList.toggle("is-bgc-disabled", !enabled);
     startTime = performance.now();
     if (rafId) cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(tick);
@@ -404,8 +420,9 @@
   // ---------- Settings sync ----------
   function applyEnabled(next) {
     enabled = !!next;
-    if (enabled) mount();
-    else unmount();
+    mount();
+    if (root) root.classList.toggle("is-bgc-disabled", !enabled);
+    if (!enabled) stopRecognition();
   }
 
   function applySpeed(next) {
