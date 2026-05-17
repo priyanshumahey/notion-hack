@@ -463,18 +463,9 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   meta.className = "nh-completion-meta";
   meta.textContent = prompt.databaseName || labelForCompletionReason(prompt.reason);
 
-  const instruction = document.createElement("textarea");
-  instruction.className = "nh-completion-instruction";
-  instruction.rows = 4;
-  instruction.placeholder = "Example: Next time I like an Instagram post, save the post URL and caption to my Instagram Likes Notion database.";
-  instruction.hidden = true;
-  instruction.addEventListener("click", (e) => e.stopPropagation());
-  instruction.addEventListener("input", () => {
-    save.disabled = !instruction.value.trim();
-  });
-
   const actions = document.createElement("div");
   actions.className = "nh-completion-actions";
+  let instruction: HTMLTextAreaElement | null = null;
 
   const yes = document.createElement("button");
   yes.type = "button";
@@ -483,10 +474,18 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   yes.addEventListener("click", (e) => {
     e.stopPropagation();
     body.textContent = "What should happen next time this action happens?";
+    instruction = document.createElement("textarea");
+    instruction.className = "nh-completion-instruction";
+    instruction.rows = 4;
+    instruction.placeholder = "Example: Next time I like an Instagram post, save the post URL and caption to my Instagram Likes Notion database.";
+    instruction.addEventListener("click", (event) => event.stopPropagation());
+    instruction.addEventListener("input", () => {
+      save.disabled = !instruction?.value.trim();
+    });
+    root.insertBefore(instruction, actions);
     yes.hidden = true;
     save.hidden = false;
-    save.disabled = !instruction.value.trim();
-    instruction.hidden = false;
+    save.disabled = true;
     instruction.focus();
   });
 
@@ -498,11 +497,11 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   save.disabled = true;
   save.addEventListener("click", async (e) => {
     e.stopPropagation();
-    const userInstruction = instruction.value.trim();
+    const userInstruction = instruction?.value.trim() ?? "";
     if (!userInstruction) return;
     save.disabled = true;
     no.disabled = true;
-    instruction.disabled = true;
+    if (instruction) instruction.disabled = true;
     body.textContent = "Saving instruction to Notion...";
     const resp = await send({
       t: "setCompletionStatus",
@@ -515,7 +514,7 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
       meta.textContent = resp.message;
       save.disabled = false;
       no.disabled = false;
-      instruction.disabled = false;
+      if (instruction) instruction.disabled = false;
       return;
     }
     if (resp.t === "completion" && resp.completion?.applied?.status === "failed") {
@@ -523,7 +522,7 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
       meta.textContent = resp.completion.applied.errorMessage ?? "Apply failed.";
       save.disabled = false;
       no.disabled = false;
-      instruction.disabled = false;
+      if (instruction) instruction.disabled = false;
       return;
     }
     root.remove();
@@ -540,7 +539,7 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   });
 
   actions.append(yes, save, no);
-  root.append(title, body, meta, instruction, actions);
+  root.append(title, body, meta, actions);
   document.documentElement.appendChild(root);
 }
 
