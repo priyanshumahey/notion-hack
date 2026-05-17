@@ -509,7 +509,7 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
       no.disabled = false;
       return;
     }
-    root.remove();
+    showSavedInteractionRunner(root, prompt);
   });
 
   const no = document.createElement("button");
@@ -525,6 +525,68 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   actions.append(yes, no);
   root.append(title, body, details, meta, actions);
   document.documentElement.appendChild(root);
+}
+
+function showSavedInteractionRunner(
+  root: HTMLElement,
+  prompt: Extract<Msg, { t: "completionPrompt" }>,
+) {
+  root.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.className = "nh-completion-title";
+  title.textContent = "Saved Interaction";
+
+  const body = document.createElement("div");
+  body.className = "nh-completion-body";
+  body.textContent = "Background agents for this repeatable action";
+
+  const list = document.createElement("div");
+  list.className = "nh-agent-run-list";
+
+  const row = document.createElement("div");
+  row.className = "nh-agent-run-row is-running";
+
+  const runText = document.createElement("div");
+  runText.className = "nh-agent-run-text";
+
+  const runName = document.createElement("div");
+  runName.className = "nh-agent-run-name";
+  runName.textContent = prompt.databaseName || labelForCompletionReason(prompt.reason);
+
+  const runMeta = document.createElement("div");
+  runMeta.className = "nh-agent-run-meta";
+  runMeta.textContent = `${prompt.triggerKind ?? "event"} / ${prompt.site ?? "current site"}`;
+
+  runText.append(runName, runMeta);
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "nh-agent-run-toggle";
+  toggle.textContent = "Pause";
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const paused = row.classList.toggle("is-paused");
+    row.classList.toggle("is-running", !paused);
+    toggle.textContent = paused ? "Play" : "Pause";
+  });
+
+  row.append(runText, toggle);
+  list.appendChild(row);
+
+  const actions = document.createElement("div");
+  actions.className = "nh-completion-actions";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "nh-completion-button";
+  close.textContent = "Close";
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    root.remove();
+  });
+  actions.appendChild(close);
+
+  root.append(title, body, list, actions);
 }
 
 function completionPromptDetails(
@@ -934,6 +996,83 @@ const COMPLETION_PROMPT_CSS = `
   justify-content: flex-end;
   gap: 10px;
   margin-top: 16px;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-row::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #22c55e;
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.12);
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-row.is-paused::before {
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-name {
+  overflow: hidden;
+  color: #f1f4f8;
+  font-size: 12px;
+  line-height: 1.2;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-meta {
+  overflow: hidden;
+  margin-top: 3px;
+  color: #7a8290;
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-toggle {
+  flex: 0 0 auto;
+  height: 28px;
+  min-width: 58px;
+  border: 1px solid rgba(34, 197, 94, 0.28);
+  border-radius: 7px;
+  background: rgba(34, 197, 94, 0.13);
+  color: #86efac;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-agent-run-row.is-paused .nh-agent-run-toggle {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.13);
+  color: #fbbf24;
 }
 
 #${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button {
