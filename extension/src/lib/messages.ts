@@ -9,7 +9,7 @@ import type { HybridActionOverride } from "./types";
 export type Msg =
   // content → bg
   | { t: "evt"; event: import("./types").RawEvent }
-  | { t: "setCompletionStatus"; id: string; status: "dismissed" | "promoted" }
+  | { t: "setCompletionStatus"; id: string; status: "dismissed" | "promoted"; instruction?: string }
   // bg → content
   | {
       t: "completionPrompt";

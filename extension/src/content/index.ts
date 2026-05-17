@@ -463,6 +463,16 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   meta.className = "nh-completion-meta";
   meta.textContent = prompt.databaseName || labelForCompletionReason(prompt.reason);
 
+  const instruction = document.createElement("textarea");
+  instruction.className = "nh-completion-instruction";
+  instruction.rows = 4;
+  instruction.placeholder = "Example: Next time I like an Instagram post, save the post URL and caption to my Instagram Likes Notion database.";
+  instruction.hidden = true;
+  instruction.addEventListener("click", (e) => e.stopPropagation());
+  instruction.addEventListener("input", () => {
+    save.disabled = !instruction.value.trim();
+  });
+
   const actions = document.createElement("div");
   actions.className = "nh-completion-actions";
 
@@ -470,24 +480,50 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   yes.type = "button";
   yes.className = "nh-completion-button is-primary";
   yes.textContent = "Yes";
-  yes.addEventListener("click", async (e) => {
+  yes.addEventListener("click", (e) => {
     e.stopPropagation();
-    yes.disabled = true;
+    body.textContent = "What should happen next time this action happens?";
+    yes.hidden = true;
+    save.hidden = false;
+    save.disabled = !instruction.value.trim();
+    instruction.hidden = false;
+    instruction.focus();
+  });
+
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "nh-completion-button is-primary";
+  save.textContent = "Save instruction";
+  save.hidden = true;
+  save.disabled = true;
+  save.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const userInstruction = instruction.value.trim();
+    if (!userInstruction) return;
+    save.disabled = true;
     no.disabled = true;
-    body.textContent = "Saving to Notion...";
-    const resp = await send({ t: "setCompletionStatus", id: prompt.id, status: "promoted" });
+    instruction.disabled = true;
+    body.textContent = "Saving instruction to Notion...";
+    const resp = await send({
+      t: "setCompletionStatus",
+      id: prompt.id,
+      status: "promoted",
+      instruction: userInstruction,
+    });
     if (resp.t === "error") {
       body.textContent = "Could not save to Notion.";
       meta.textContent = resp.message;
-      yes.disabled = false;
+      save.disabled = false;
       no.disabled = false;
+      instruction.disabled = false;
       return;
     }
     if (resp.t === "completion" && resp.completion?.applied?.status === "failed") {
       body.textContent = "Could not save to Notion.";
       meta.textContent = resp.completion.applied.errorMessage ?? "Apply failed.";
-      yes.disabled = false;
+      save.disabled = false;
       no.disabled = false;
+      instruction.disabled = false;
       return;
     }
     root.remove();
@@ -503,8 +539,8 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
     root.remove();
   });
 
-  actions.append(yes, no);
-  root.append(title, body, meta, actions);
+  actions.append(yes, save, no);
+  root.append(title, body, meta, instruction, actions);
   document.documentElement.appendChild(root);
 }
 
@@ -817,7 +853,7 @@ const COMPLETION_PROMPT_CSS = `
   right: 24px;
   top: 24px;
   z-index: 2147483647;
-  width: min(360px, calc(100vw - 32px));
+  width: min(460px, calc(100vw - 32px));
   box-sizing: border-box;
   padding: 18px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -829,7 +865,7 @@ const COMPLETION_PROMPT_CSS = `
   color: #f1f4f8;
   font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", "Geist Mono", "Roboto Mono", Consolas, monospace;
   pointer-events: auto;
-  user-select: none;
+  user-select: text;
 }
 
 #${COMPLETION_PROMPT_ROOT_ID},
@@ -863,6 +899,33 @@ const COMPLETION_PROMPT_CSS = `
   white-space: nowrap;
 }
 
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-instruction {
+  display: block;
+  width: 100%;
+  min-height: 104px;
+  margin-top: 14px;
+  padding: 10px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f1f4f8;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  outline: none;
+  resize: vertical;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-instruction::placeholder {
+  color: #6b7280;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-instruction:focus {
+  border-color: rgba(34, 197, 94, 0.4);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.08);
+}
+
 #${COMPLETION_PROMPT_ROOT_ID} .nh-completion-actions {
   display: flex;
   justify-content: flex-end;
@@ -881,6 +944,12 @@ const COMPLETION_PROMPT_CSS = `
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button:disabled,
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 #${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button:hover {

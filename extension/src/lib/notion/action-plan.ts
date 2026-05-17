@@ -53,6 +53,8 @@ export function withHybridActionPlan(
 ): NotionProposal {
   const plan = candidate.hybridAction
     ? fromOverride(candidate.hybridAction, candidate)
+    : candidate.userInstruction
+      ? fromInstruction(candidate.userInstruction, candidate)
     : inferHybridAction(candidate, getNotionNativeConnectorMatches(candidate));
   const existingProps = new Set(proposal.database.properties.map((p) => p.name));
   const properties = [
@@ -81,7 +83,9 @@ interface HybridActionPlan {
 }
 
 export function defaultHybridAction(candidate: CompletionCandidate): HybridActionOverride {
-  const plan = inferHybridAction(candidate, getNotionNativeConnectorMatches(candidate));
+  const plan = candidate.userInstruction
+    ? fromInstruction(candidate.userInstruction, candidate)
+    : inferHybridAction(candidate, getNotionNativeConnectorMatches(candidate));
   return {
     actionType: String(cellValue(plan.row, "Action Type") ?? "Save to Notion") as HybridActionType,
     connector: String(cellValue(plan.row, "Suggested Connector") ?? "Notion"),
@@ -104,6 +108,47 @@ function fromOverride(
       { property: "Source URL", value: candidate.trigger.url },
     ],
   };
+}
+
+function fromInstruction(instruction: string, candidate: CompletionCandidate): HybridActionPlan {
+  const normalized = instruction.toLowerCase();
+  let actionType: HybridActionType = "Save to Notion";
+  let connector = "Notion";
+  if (/\bslack\b|#\w+/.test(normalized)) {
+    actionType = "Send Slack message";
+    connector = "Slack";
+  } else if (/\bemail\b|\bgmail\b|\bmail\b/.test(normalized)) {
+    actionType = "Draft email";
+    connector = "Gmail";
+  } else if (/\btask\b|\bissue\b|\bticket\b|\bjira\b|\bgithub\b|\basana\b/.test(normalized)) {
+    actionType = "Create task";
+    connector = normalized.includes("jira")
+      ? "Jira"
+      : normalized.includes("github")
+        ? "GitHub"
+        : normalized.includes("asana")
+          ? "Asana"
+          : "Notion";
+  }
+
+  return {
+    row: [
+      { property: "Action Type", value: actionType },
+      { property: "Action Status", value: actionType === "Save to Notion" ? "Ready" : "Needs review" },
+      { property: "Suggested Connector", value: connector },
+      { property: "Action Target", value: inferTarget(instruction) },
+      { property: "Action Draft", value: instruction },
+      { property: "Source URL", value: candidate.trigger.url },
+    ],
+  };
+}
+
+function inferTarget(instruction: string): string {
+  const channel = instruction.match(/#[a-z0-9_-]+/i)?.[0];
+  if (channel) return channel;
+  const email = instruction.match(/[^\s@]+@[^\s@]+\.[^\s@]+/)?.[0];
+  if (email) return email;
+  return "";
 }
 
 function cellValue(row: NotionRowCell[], property: string): NotionRowCell["value"] | undefined {
