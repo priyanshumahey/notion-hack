@@ -17,7 +17,7 @@
 import { makeLog } from "../lib/log";
 import { canonicalizeUrl } from "../lib/canonicalize";
 import { fingerprintOf } from "../lib/fingerprint";
-import { send, type Msg } from "../lib/messages";
+import { send, isDeadContext, type Msg } from "../lib/messages";
 import { newId } from "../lib/ids";
 import { capturePageContext, captureFormContext } from "../lib/page-context";
 import { DwellTracker, type DwellSnapshot } from "../lib/dwell";
@@ -55,6 +55,16 @@ function install() {
   }
 
   // ---- helpers ----------------------------------------------------------
+  let deadWarned = false;
+  function warnDeadOnce() {
+    if (deadWarned) return;
+    deadWarned = true;
+    log.error(
+      "extension context invalidated — content script can no longer reach background. " +
+        "Reload this page to re-inject. Until then events on this tab are lost.",
+    );
+  }
+
   function emit(
     kind: RawEvent["kind"],
     fingerprint?: Fingerprint,
@@ -64,6 +74,10 @@ function install() {
       meta?: Record<string, unknown>;
     },
   ) {
+    if (isDeadContext()) {
+      warnDeadOnce();
+      return;
+    }
     const url = location.href;
     const ev: RawEvent = {
       id: newId(),
@@ -77,10 +91,19 @@ function install() {
       meta: extras?.meta,
     };
     log(kind, ev);
-    void send({ t: "evt", event: ev });
+    void send({ t: "evt", event: ev }).then((resp) => {
+      if (resp.t === "error") {
+        if (isDeadContext()) warnDeadOnce();
+        else log.warn("send failed", kind, resp.message);
+      }
+    });
   }
 
   function emitDwell(snap: DwellSnapshot) {
+    if (isDeadContext()) {
+      warnDeadOnce();
+      return;
+    }
     const ev: RawEvent = {
       id: newId(),
       ts: Date.now(),
@@ -91,7 +114,12 @@ function install() {
       meta: snap.meta as unknown as Record<string, unknown>,
     };
     log("page-dwell", ev);
-    void send({ t: "evt", event: ev });
+    void send({ t: "evt", event: ev }).then((resp) => {
+      if (resp.t === "error") {
+        if (isDeadContext()) warnDeadOnce();
+        else log.warn("send dwell failed", resp.message);
+      }
+    });
   }
 
   if (IS_TOP_FRAME) installCompletionPromptListener();

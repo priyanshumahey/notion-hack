@@ -3,6 +3,7 @@
 // wrapper buy us refactor safety without a heavyweight RPC framework.
 
 import type { AppEvent, CompletionCandidate } from "./types";
+import type { NotionDatabase, NotionPage } from "./notion/types";
 
 export type Msg =
   // content → bg
@@ -25,6 +26,13 @@ export type Msg =
   | { t: "retryJudge"; id: string }
   | { t: "deleteCompletion"; id: string }
   | { t: "clearCompletions" }
+  | { t: "applyCandidate"; id: string }
+  | { t: "denyCandidate"; id: string }
+  // popup → bg : notion (mock for now)
+  | { t: "notionListDatabases" }
+  | { t: "notionGetDatabase"; id: string }
+  | { t: "notionListPages"; databaseId: string; limit: number }
+  | { t: "notionClearAll" }
   // popup → bg : settings / health
   | { t: "getKeyStatus" }
   | { t: "setOpenAiKey"; key: string }
@@ -36,6 +44,9 @@ export type MsgResponse =
   | { t: "recent"; events: AppEvent[] }
   | { t: "completions"; completions: CompletionCandidate[] }
   | { t: "completion"; completion: CompletionCandidate | null }
+  | { t: "notionDatabases"; workspace: string; databases: NotionDatabase[] }
+  | { t: "notionDatabase"; database: NotionDatabase | null }
+  | { t: "notionPages"; pages: NotionPage[] }
   | { t: "keyStatus"; hasKey: boolean; source: "stored" | "build" | "none"; redacted: string }
   | { t: "testResult"; ok: boolean; error?: string }
   | { t: "pong"; at: number }
@@ -47,14 +58,31 @@ export function send<T extends Msg>(msg: T): Promise<MsgResponse> {
     try {
       chrome.runtime.sendMessage(msg, (resp: MsgResponse | undefined) => {
         if (chrome.runtime.lastError) {
-          // Background may be cold or page may be unprivileged. Don't throw.
-          resolve({ t: "error", message: chrome.runtime.lastError.message ?? "unknown" });
+          const m = chrome.runtime.lastError.message ?? "unknown";
+          // "Extension context invalidated" fires in content scripts of
+          // tabs that were open when the extension was reloaded. Once
+          // this happens NO further sends from this script will work —
+          // the page must be reloaded. Mark a flag so callers can stop
+          // trying.
+          if (m.toLowerCase().includes("context invalidated")) {
+            (globalThis as { __nhDead?: boolean }).__nhDead = true;
+          }
+          resolve({ t: "error", message: m });
           return;
         }
         resolve(resp ?? { t: "ok" });
       });
     } catch (e) {
-      resolve({ t: "error", message: (e as Error).message });
+      const m = (e as Error).message;
+      if (m.toLowerCase().includes("context invalidated")) {
+        (globalThis as { __nhDead?: boolean }).__nhDead = true;
+      }
+      resolve({ t: "error", message: m });
     }
   });
+}
+
+/** True once `send` has seen an "Extension context invalidated" error. */
+export function isDeadContext(): boolean {
+  return !!(globalThis as { __nhDead?: boolean }).__nhDead;
 }

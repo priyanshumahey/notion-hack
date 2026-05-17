@@ -1,21 +1,34 @@
-// IndexedDB-backed implementation of EventStore + CompletionStore.
+// IndexedDB-backed implementation of EventStore + CompletionStore + Notion mock.
 //
-// One database (`notion-hack`), two object stores:
-//   - `events`      v1, keyed by id, indexed by ts          (high volume; capped + evicted)
-//   - `completions` v2, keyed by id, indexed by detectedAt  (low volume; no eviction)
+// One database (`notion-hack`), four object stores:
+//   - `events`            v1, keyed by id, indexed by ts          (high volume; capped + evicted)
+//   - `completions`       v2, keyed by id, indexed by detectedAt  (low volume; no eviction)
+//   - `notion_databases`  v3, keyed by id                          (mock Notion workspace)
+//   - `notion_pages`      v3, keyed by id, indexed by databaseId  (mock Notion pages)
 
 import type { AppEvent, CompletionCandidate } from "../types";
 import { makeLog } from "../log";
 import type { EventStore } from "./index";
 
 const DB_NAME = "notion-hack";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const EVENTS_STORE = "events";
 const EVENTS_TS_INDEX = "ts";
 const COMPLETIONS_STORE = "completions";
 const COMPLETIONS_TS_INDEX = "detectedAt";
+const NOTION_DATABASES_STORE = "notion_databases";
+const NOTION_PAGES_STORE = "notion_pages";
+const NOTION_PAGES_DB_INDEX = "databaseId";
 const MAX_EVENTS = 20_000;
 const EVICT_BATCH = 1_000;
+
+export const STORES = {
+  events: EVENTS_STORE,
+  completions: COMPLETIONS_STORE,
+  notionDatabases: NOTION_DATABASES_STORE,
+  notionPages: NOTION_PAGES_STORE,
+  notionPagesDbIndex: NOTION_PAGES_DB_INDEX,
+} as const;
 
 const log = makeLog("store");
 
@@ -35,6 +48,11 @@ export function openDb(): Promise<IDBDatabase> {
       if (oldVersion < 2) {
         const os = db.createObjectStore(COMPLETIONS_STORE, { keyPath: "id" });
         os.createIndex(COMPLETIONS_TS_INDEX, "detectedAt", { unique: false });
+      }
+      if (oldVersion < 3) {
+        db.createObjectStore(NOTION_DATABASES_STORE, { keyPath: "id" });
+        const pagesOs = db.createObjectStore(NOTION_PAGES_STORE, { keyPath: "id" });
+        pagesOs.createIndex(NOTION_PAGES_DB_INDEX, "databaseId", { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);

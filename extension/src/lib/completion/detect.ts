@@ -136,10 +136,20 @@ export interface DetectInput {
   /** All recent events (newest→oldest), used by repetition + action-click. */
   history: AppEvent[];
   /**
-   * Cluster keys we've ALREADY fired a repetition trigger for recently —
-   * used to throttle. Owned by the ingest layer.
+   * Cluster keys we should NOT fire a repetition trigger for right now.
+   * Owned by ingest. Populated from:
+   *   - clusters with a pending or denied candidate (don't pester);
+   *   - approved clusters do NOT appear here — we want re-fires there so
+   *     the user can keep adding new items to the same DB.
    */
   recentlyFiredRepetitionClusters: Set<string>;
+  /**
+   * Exact URLs already firing a repetition candidate in the recent past.
+   * Per-URL dedup runs in addition to the cluster check — prevents
+   * duplicate candidates for the same job/listing as the user revisits
+   * the same SPA page.
+   */
+  recentlyFiredRepetitionUrls: Set<string>;
   /**
    * `${host}:${verb}` keys we've ALREADY fired an action-click trigger for
    * recently — used to throttle.
@@ -211,7 +221,12 @@ export function detectTriggers(input: DetectInput): Trigger[] {
     event.kind === "page-dwell" ||
     (event.kind === "nav" && event.pageContext)
   ) {
-    const rep = detectRepetition(event, input.history, input.recentlyFiredRepetitionClusters);
+    const rep = detectRepetition(
+      event,
+      input.history,
+      input.recentlyFiredRepetitionClusters,
+      input.recentlyFiredRepetitionUrls,
+    );
     if (rep) out.push(rep);
   }
 
@@ -227,11 +242,14 @@ export function detectTriggers(input: DetectInput): Trigger[] {
 function detectRepetition(
   event: AppEvent,
   history: AppEvent[],
-  recentlyFired: Set<string>,
+  blockedClusters: Set<string>,
+  firedUrls: Set<string>,
 ): Trigger | null {
   const cluster = clusterKeyForEvent(event.pageKey);
   if (!cluster) return null;
-  if (recentlyFired.has(cluster)) return null;
+  if (blockedClusters.has(cluster)) return null;
+  // Per-URL dedup: never fire two candidates for the exact same URL.
+  if (firedUrls.has(event.url)) return null;
 
   const cutoffTs = event.ts - REPETITION_LOOKBACK_MS;
   const distinctUrls = new Set<string>();

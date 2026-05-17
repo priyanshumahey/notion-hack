@@ -195,4 +195,17 @@ export interface CompletionCandidate {
   /** Populated when the judge call failed; null on success. */
   error: string | null;
   status: "new" | "dismissed" | "promoted";
+  /** Notion application state. Undefined = never applied. */
+  applied?: {
+    status: "pending" | "applied" | "skipped" | "failed";
+    databaseId?: string;
+    pageId?: string;
+    pageUrl?: string;
+    errorMessage?: string;
+    /** Fields that didn't match the DB schema and weren't written. */
+    droppedFields?: { property: string; reason: string }[];
+    appliedAt?: number;
+    /** True when applied automatically (cluster previously approved by user). */
+    auto?: boolean;
+  };
 }

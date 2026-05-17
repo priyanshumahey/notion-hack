@@ -16,6 +16,8 @@ import { getEventStore, getCompletionStore } from "../lib/store";
 import { canonicalizeUrl } from "../lib/canonicalize";
 import { newId } from "../lib/ids";
 import { ingest, retryJudge } from "./ingest";
+import { applyCandidate, denyCandidate } from "./apply";
+import { getNotionGateway } from "../lib/notion/gateway";
 import { describeKeySource, hasOpenAiKey, redactKey, setOpenAiKey, getOpenAiKey } from "../lib/settings";
 import { pingOpenAi } from "../lib/openai";
 import type { Msg, MsgResponse } from "../lib/messages";
@@ -24,6 +26,7 @@ import type { AppEvent, RawEvent } from "../lib/types";
 const log = makeLog("bg");
 const events = getEventStore();
 const completions = getCompletionStore();
+const notion = getNotionGateway();
 
 chrome.runtime.onInstalled.addListener((details) => {
   log("installed", details.reason);
@@ -114,6 +117,31 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
       log.warn("cleared all completions");
       return { t: "ok" };
     }
+    case "applyCandidate": {
+      const c = await applyCandidate(msg.id);
+      return { t: "completion", completion: c };
+    }
+    case "denyCandidate": {
+      const c = await denyCandidate(msg.id);
+      return { t: "completion", completion: c };
+    }
+    case "notionListDatabases": {
+      const dbs = await notion.listDatabases();
+      return { t: "notionDatabases", workspace: notion.workspaceLabel(), databases: dbs };
+    }
+    case "notionGetDatabase": {
+      const db = await notion.getDatabase(msg.id);
+      return { t: "notionDatabase", database: db };
+    }
+    case "notionListPages": {
+      const pages = await notion.listPages(msg.databaseId, msg.limit);
+      return { t: "notionPages", pages };
+    }
+    case "notionClearAll": {
+      await notion.clearAll();
+      log.warn("cleared all notion mock data");
+      return { t: "ok" };
+    }
     case "getKeyStatus": {
       const source = await describeKeySource();
       const hasKey = source !== "none";
@@ -157,4 +185,8 @@ function stampRaw(raw: RawEvent, tabId: number): AppEvent {
   completions: (n = 50) => completions.recent(n),
   completionCount: () => completions.count(),
   clearCompletions: () => completions.clear(),
+  applyCandidate: (id: string) => applyCandidate(id),
+  notionDatabases: () => notion.listDatabases(),
+  notionPages: (dbId: string, n = 100) => notion.listPages(dbId, n),
+  notionClear: () => notion.clearAll(),
 };

@@ -14,9 +14,10 @@ const LIMIT = 50;
 interface Props {
   hasKey: boolean;
   onNeedKey: () => void;
+  onOpenNotion: () => void;
 }
 
-export function CompletionsView({ hasKey, onNeedKey }: Props) {
+export function CompletionsView({ hasKey, onNeedKey, onOpenNotion }: Props) {
   const [items, setItems] = useState<CompletionCandidate[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -41,6 +42,14 @@ export function CompletionsView({ hasKey, onNeedKey }: Props) {
   async function onDelete(id: string) {
     await send({ t: "deleteCompletion", id });
     if (openId === id) setOpenId(null);
+    refresh();
+  }
+  async function onApply(id: string) {
+    await send({ t: "applyCandidate", id });
+    refresh();
+  }
+  async function onDeny(id: string) {
+    await send({ t: "denyCandidate", id });
     refresh();
   }
   async function clearAll() {
@@ -97,6 +106,9 @@ export function CompletionsView({ hasKey, onNeedKey }: Props) {
             onToggle={() => setOpenId(openId === c.id ? null : c.id)}
             onRetry={() => onRetry(c.id)}
             onDelete={() => onDelete(c.id)}
+            onApply={() => onApply(c.id)}
+            onDeny={() => onDeny(c.id)}
+            onOpenNotion={onOpenNotion}
           />
         ))}
       </ul>
@@ -110,9 +122,12 @@ interface RowProps {
   onToggle: () => void;
   onRetry: () => void;
   onDelete: () => void;
+  onApply: () => void;
+  onDeny: () => void;
+  onOpenNotion: () => void;
 }
 
-function CompletionRow({ c, expanded, onToggle, onRetry, onDelete }: RowProps) {
+function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDeny, onOpenNotion }: RowProps) {
   const time = new Date(c.detectedAt).toLocaleTimeString(undefined, { hour12: false });
   const j = c.judgement;
   return (
@@ -191,16 +206,68 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete }: RowProps) {
             </ul>
           </Section>
 
-          <div className="flex gap-2 pt-1">
+          <div className="flex flex-wrap gap-2 pt-1 items-center">
+            {j?.meaningful && j.proposal && !c.applied && (
+              <>
+                <button
+                  onClick={onApply}
+                  className="px-2.5 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 text-[11px] font-medium"
+                >
+                  approve &amp; add to notion
+                </button>
+                <button
+                  onClick={onDeny}
+                  className="px-2.5 py-1 rounded border border-slate-300 text-slate-700 hover:bg-white text-[11px] font-medium"
+                  title="Reject this proposal and stop suggesting this pattern for a while."
+                >
+                  deny
+                </button>
+              </>
+            )}
+            {c.applied?.status === "pending" && (
+              <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] uppercase tracking-wide">
+                applying…
+              </span>
+            )}
+            {c.applied?.status === "applied" && (
+              <button
+                onClick={onOpenNotion}
+                className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] uppercase tracking-wide hover:bg-emerald-200"
+              >
+                {c.applied.auto ? "⚡ auto-applied" : "✓ applied"} · view in notion
+              </button>
+            )}
+            {c.applied?.status === "skipped" && (
+              <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] uppercase tracking-wide">
+                denied
+              </span>
+            )}
+            {c.applied?.status === "failed" && (
+              <span
+                className="px-2 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] uppercase tracking-wide"
+                title={c.applied.errorMessage}
+              >
+                apply failed
+              </span>
+            )}
+            {c.applied?.droppedFields && c.applied.droppedFields.length > 0 && (
+              <span
+                className="text-[10px] text-amber-700"
+                title={c.applied.droppedFields.map((d) => `${d.property}: ${d.reason}`).join("\n")}
+              >
+                {c.applied.droppedFields.length} field
+                {c.applied.droppedFields.length === 1 ? "" : "s"} dropped
+              </span>
+            )}
             <button
               onClick={onRetry}
-              className="px-2 py-0.5 rounded border border-slate-200 hover:bg-white"
+              className="px-2 py-0.5 rounded border border-slate-200 hover:bg-white text-[11px]"
             >
               retry judge
             </button>
             <button
               onClick={onDelete}
-              className="px-2 py-0.5 rounded border border-rose-200 text-rose-700 hover:bg-white"
+              className="px-2 py-0.5 rounded border border-rose-200 text-rose-700 hover:bg-white text-[11px]"
             >
               delete
             </button>
@@ -214,7 +281,13 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete }: RowProps) {
 function StateBadge({ c }: { c: CompletionCandidate }) {
   let color = "bg-slate-200 text-slate-700";
   let label = "pending";
-  if (c.error) {
+  if (c.applied?.status === "applied") {
+    color = "bg-emerald-100 text-emerald-800";
+    label = c.applied.auto ? "auto-applied" : "applied";
+  } else if (c.status === "dismissed") {
+    color = "bg-slate-200 text-slate-500";
+    label = "denied";
+  } else if (c.error) {
     color = "bg-rose-100 text-rose-800";
     label = "error";
   } else if (c.judgement) {

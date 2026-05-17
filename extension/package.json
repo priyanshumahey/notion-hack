@@ -6,7 +6,7 @@
   "description": "Basic React + Tailwind Chrome (MV3) extension.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && rm -rf dist && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },

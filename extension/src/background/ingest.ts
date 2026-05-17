@@ -32,12 +32,15 @@ import { getEventStore, getCompletionStore } from "../lib/store";
 import { detectTriggers, clickSignature, type Trigger } from "../lib/completion/detect";
 import { buildLookback } from "../lib/completion/lookback";
 import { hasOpenAiKey } from "../lib/settings";
-import { judgeCandidate } from "../lib/openai";
+import { judgeCandidate, type KnownDatabase } from "../lib/openai";
+import { getNotionGateway } from "../lib/notion/gateway";
+import { applyCandidate } from "./apply";
 import type { AppEvent, CompletionCandidate } from "../lib/types";
 
 const log = makeLog("bg");
 const events = getEventStore();
 const completions = getCompletionStore();
+const notion = getNotionGateway();
 
 // ---- tunables -------------------------------------------------------------
 const LOOKBACK_FETCH = 800;                          // events scanned for lookback + repetition history
@@ -46,6 +49,7 @@ const REPETITION_THROTTLE_MS = 7 * 24 * 60 * 60_000; // 7 days per pageKey clust
 const ACTION_CLICK_THROTTLE_MS = 5 * 60_000;         // 5 min per (host, verb)
 const ACTION_CLICK_CONTEXT_WINDOW_MS = 5 * 60_000;   // include action-clicks from last 5 min in context
 const ACTION_CLICK_MAX_CONTEXT = 40;                 // hard cap on context size for action-click
+const AUTO_APPLY_MIN_CONFIDENCE = 0.55;              // skip silent apply when LLM is wishy-washy
 
 export async function ingest(event: AppEvent): Promise<void> {
   await events.append(event);
@@ -60,15 +64,16 @@ export async function ingest(event: AppEvent): Promise<void> {
   const history = await events.recent(LOOKBACK_FETCH);
 
   // Build the throttle sets. Cheap scans of the latest few hundred candidates.
-  const [recentlyFiredRepetition, recentlyFiredAction] = await Promise.all([
-    loadRecentRepetitionClusters(),
+  const [repThrottle, recentlyFiredAction] = await Promise.all([
+    loadRepetitionThrottle(),
     loadRecentActionClusters(),
   ]);
 
   const triggers = detectTriggers({
     event,
     history,
-    recentlyFiredRepetitionClusters: recentlyFiredRepetition,
+    recentlyFiredRepetitionClusters: repThrottle.blockedClusters,
+    recentlyFiredRepetitionUrls: repThrottle.firedUrls,
     recentlyFiredActionClusters: recentlyFiredAction,
   });
   if (triggers.length === 0) return;
@@ -137,7 +142,8 @@ async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): 
 
   // Judge (best-effort; errors are stored on the candidate).
   try {
-    const judgement = await judgeCandidate(candidate, [/* no known DBs yet */]);
+    const knownDbs = await loadKnownDatabases();
+    const judgement = await judgeCandidate(candidate, knownDbs);
     candidate.judgement = judgement;
     candidate.error = null;
     await completions.update(candidate);
@@ -145,8 +151,36 @@ async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): 
       meaningful: judgement.meaningful,
       confidence: judgement.confidence,
       proposalDb: judgement.proposal?.database.name,
+      mode: judgement.proposal?.database.mode,
     });
-    if (judgement.meaningful) {
+    // Auto-apply path: the user has previously approved a candidate
+    // landing in some database X. If the judge now picks `use-existing`
+    // pointing at that same X, treat the user's prior approval as a
+    // standing trust signal for X and apply silently. The LLM does the
+    // semantic matching; the user's prior approval validates the
+    // destination.
+    //
+    // We do NOT require trigger reason or pageKey match — recipes,
+    // articles, jobs, etc. all have unique slugs so pageKey-equality is
+    // too tight. The DB-equality gate plus the LLM's confidence is the
+    // right level of strictness.
+    let autoApplied = false;
+    if (
+      judgement.meaningful &&
+      judgement.proposal &&
+      judgement.proposal.database.mode === "use-existing" &&
+      judgement.proposal.database.existingId &&
+      judgement.confidence >= AUTO_APPLY_MIN_CONFIDENCE
+    ) {
+      const dbId = judgement.proposal.database.existingId;
+      if (await isApprovedDatabase(dbId)) {
+        log("auto-apply: DB previously approved", candidate.id, "→", dbId);
+        await applyCandidate(candidate.id, { auto: true });
+        autoApplied = true;
+      }
+    }
+
+    if (judgement.meaningful && !autoApplied) {
       notifyCompletionPrompt(candidate).catch((err) => {
         log.warn("completion prompt notify failed", candidate.id, err);
       });
@@ -274,20 +308,36 @@ async function coalesceWithRecent(
 }
 
 /**
- * Look at recent candidates; find clusters where a "repetition" trigger
- * already fired within REPETITION_THROTTLE_MS. We use the candidate's
- * trigger pageKey as the cluster identifier (matches the detector logic).
+ * Compute the per-cluster throttle state for the repetition trigger.
+ *
+ *   blockedClusters: clusters where firing another candidate right now would
+ *     be noise — they have a recent pending OR denied candidate. Approved
+ *     clusters are deliberately NOT blocked: once the user has decided
+ *     "yes, track these", new items in the cluster should surface so they
+ *     can add them to the same DB.
+ *
+ *   firedUrls: every URL we've already shown the user a candidate for in
+ *     the lookback window. Stops SPA revisits to the same page from
+ *     creating duplicate candidates even in approved clusters.
  */
-async function loadRecentRepetitionClusters(): Promise<Set<string>> {
-  const recent = await completions.recent(200);
-  const out = new Set<string>();
+async function loadRepetitionThrottle(): Promise<{
+  blockedClusters: Set<string>;
+  firedUrls: Set<string>;
+}> {
+  const recent = await completions.recent(500);
   const cutoffTs = Date.now() - REPETITION_THROTTLE_MS;
+  const blockedClusters = new Set<string>();
+  const firedUrls = new Set<string>();
   for (const c of recent) {
     if (c.reason !== "repetition") continue;
     if (c.detectedAt < cutoffTs) continue;
-    out.add(c.trigger.pageKey);
+    // Dedup by exact URL regardless of decision state.
+    firedUrls.add(c.trigger.url);
+    // Cluster is blocked unless the user explicitly approved a row from it.
+    const approved = c.applied?.status === "applied";
+    if (!approved) blockedClusters.add(c.trigger.pageKey);
   }
-  return out;
+  return { blockedClusters, firedUrls };
 }
 
 /**
@@ -320,7 +370,8 @@ export async function retryJudge(id: string): Promise<CompletionCandidate | null
     return c;
   }
   try {
-    const judgement = await judgeCandidate(c, []);
+    const knownDbs = await loadKnownDatabases();
+    const judgement = await judgeCandidate(c, knownDbs);
     c.judgement = judgement;
     c.error = null;
   } catch (e) {
@@ -328,6 +379,32 @@ export async function retryJudge(id: string): Promise<CompletionCandidate | null
   }
   await completions.update(c);
   return c;
+}
+
+/**
+ * Snapshot of currently-known Notion databases for the judge prompt.
+ * Lets the LLM choose `use-existing` and reuse a DB the user has already
+ * approved, instead of proposing a near-duplicate every time a new item
+ * in an approved cluster fires a candidate.
+ */
+async function loadKnownDatabases(): Promise<KnownDatabase[]> {
+  const dbs = await notion.listDatabases();
+  return dbs.map((d) => ({ id: d.id, name: d.name, properties: d.properties }));
+}
+
+/**
+ * Has the user ever applied a candidate that landed in this database?
+ * Used by the auto-apply path: prior approval to a DB = standing trust
+ * signal for any future judgement that proposes `use-existing` → same DB.
+ */
+async function isApprovedDatabase(dbId: string): Promise<boolean> {
+  const recent = await completions.recent(500);
+  for (const c of recent) {
+    if (c.applied?.status === "applied" && c.applied.databaseId === dbId) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function uniq<T>(xs: T[]): T[] {
