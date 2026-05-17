@@ -6,38 +6,40 @@
 //   2. terminal-nav   — nav to a URL whose path screams "you just finished
 //                       something" (confirmation / success / thank-you /
 //                       applied / order-placed / receipt). Strong, single-shot.
-//   3. repetition     — same pageKey cluster observed ≥ N distinct URLs
-//                       in the recent past. Pure URL-pattern signal: no
-//                       dwell-duration gate. Fires on every nav-with-page-context
-//                       and every page-dwell in the cluster — the LLM filters
-//                       meaningfulness, and a 7-day per-cluster throttle in
-//                       ingest prevents refires. Used to catch URL-based
-//                       reading patterns AND shopping-style browsing (3 car
+//   3. content-dwell  — user engaged with a page (foreground time + scroll
+//                       or interactions) that scores HIGH-VALUE on richness
+//                       (job posting, product, event, recipe, ...). One
+//                       observation is enough.
+//   4. repetition     — same pageKey cluster observed ≥ N distinct URLs
+//                       in the recent past. Pure URL-pattern signal: NO
+//                       richness gate, NO dwell-duration gate. Fires on
+//                       every nav-with-page-context and every page-dwell
+//                       in the cluster — the LLM filters meaningfulness,
+//                       and a 7-day per-cluster throttle in ingest
+//                       prevents refires. Used to catch URL-based reading
+//                       patterns AND shopping-style browsing (3 car
 //                       listings, 5 product pages, 4 Airbnb listings, ...).
-//   4. action-click   — user clicked the same UI element ≥ N times on
+//   5. action-click   — user clicked the same UI element ≥ N times on
 //                       the same host within a short window. "Same UI
 //                       element" = same testid OR same normalized
 //                       accessible-name / text label. NO verb whitelist;
 //                       we surface any repeated UI interaction and let
-//                       the LLM judge whether it's meaningful.
-//   5. rich-page      — any nav-with-pageContext OR page-dwell on a page
-//                       with substantive content (JSON-LD, og tags, or
-//                       a substantive text body). NO classification or
-//                       routing constraint — we hand the page context to
-//                       the LLM and let it decide what kind of thing it
-//                       is and whether/where to save it. Content-key
-//                       deduped so repeat visits don't burn tokens.
+//                       the LLM judge whether it's meaningful. Catches
+//                       "I bookmarked 10 tweets" / "saved 5 jobs" /
+//                       "wishlisted 4 products" — and also a long tail
+//                       of patterns we can't enumerate up front.
 //
 // All detectors are pure: they take in events and read-only history, return
 // zero-or-more triggers. Side effects (judge call, store write, throttling)
 // happen in background/ingest.ts.
 
-import type { AppEvent, Fingerprint } from "../types";
-import { hasSubstantiveContent, clusterKeyForEvent } from "./richness";
+import type { AppEvent, DwellMeta, Fingerprint } from "../types";
+import { scoreRichness, clusterKeyForEvent, type RichnessScore } from "./richness";
 
 export type TriggerReason =
   | "form-submit"
   | "terminal-nav"
+  | "content-dwell"
   | "repetition"
   | "action-click"
   | "rich-page";
@@ -54,6 +56,8 @@ export interface Trigger {
   clusterKey?: string;
   /** For repetition: distinct URLs that contributed to the cluster. */
   clusterUrls?: string[];
+  /** Carried into the judge prompt to inform the LLM how this fired. */
+  richness?: RichnessScore;
 }
 
 /**
@@ -67,13 +71,20 @@ const TERMINAL_PATH_RE =
   /(^|\/|[_-])(confirmation|submitted|success|thank[-_]?you|thanks|complete|completed|applied|order[-_]?placed|order[-_]?confirmed|receipt)(\/|$|[_-])/i;
 
 // ---- Dwell trigger tuning -------------------------------------------------
-// Not currently used as a gate (rich-page fires regardless of dwell time)
-// but kept here in case we re-introduce it. The judge gets dwell metrics
-// on the trigger event itself and can decide if engagement was meaningful.
+// Generous on token budget per user direction — these thresholds are LOW
+// because the judge call itself filters noise. Better to ask the LLM and
+// get a "not meaningful" than to miss something.
+const DWELL_HIGH_VALUE_FOREGROUND_MS = 6_000;   // 6 s on a job posting → trigger
+// Engaged-content shortcut: a "content" tier page with high engagement
+// (deep scroll + interactions) is a content-dwell trigger. Catches single
+// deep-reads of tweets/articles where the user clearly cared.
+const DWELL_ENGAGED_FOREGROUND_MS = 6_000;
+const DWELL_ENGAGED_MIN_SCROLL_PCT = 70;
+const DWELL_ENGAGED_MIN_INTERACTIONS = 2;
 
 // ---- Repetition trigger tuning --------------------------------------------
 const REPETITION_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;  // 30 days
-const REPETITION_MIN_DISTINCT_URLS = 2;                    // 2+ distinct URLs in cluster — earlier pattern recognition
+const REPETITION_MIN_DISTINCT_URLS = 3;                    // 3+ distinct URLs in cluster
 
 // ---- Action-click trigger tuning ------------------------------------------
 const ACTION_CLICK_WINDOW_MS = 5 * 60_000;  // 5 min rolling window per (host, signature)
@@ -146,24 +157,11 @@ export interface DetectInput {
    */
   recentlyFiredActionClusters: Set<string>;
   /**
-   * Content keys we've already fired a `rich-page` trigger for recently.
-   * NOT URL-based: SPAs frequently swap content under a stable URL (e.g.
-   * openai.com/careers/search showing many distinct JobPostings inline).
-   * Key shape: `${pageKey}#${title}` when a title is present, else the URL.
-   * Computed by `richDedupKey()` below. Owned by ingest.
+   * Exact URLs we've already fired a `rich-page` trigger for recently.
+   * Per-URL dedup; prevents re-judging the same recipe page on every
+   * revisit. Owned by ingest, sourced from the completions store.
    */
-  recentlyFiredRichKeys: Set<string>;
-}
-
-/**
- * Build the dedup key for the rich-page trigger from an event. Uses the
- * page's title (or JSON-LD primary type) so SPAs that swap content under a
- * stable URL re-fire for each distinct artifact.
- */
-export function richDedupKey(event: AppEvent): string {
-  const title = event.pageContext?.title?.trim();
-  if (title) return `${event.pageKey}#${title.slice(0, 200)}`;
-  return event.url;
+  recentlyFiredRichUrls: Set<string>;
 }
 
 /**
@@ -192,7 +190,35 @@ export function detectTriggers(input: DetectInput): Trigger[] {
     });
   }
 
-  // 3. Repetition — same pageKey cluster ≥ N distinct URLs in window.
+  // 3. Content-dwell — engaged with a rich page.
+  if (event.kind === "page-dwell") {
+    const dwell = event.meta as DwellMeta | undefined;
+    const rich = scoreRichness(event.pageContext);
+    if (dwell && rich.tier === "high-value" && dwell.foregroundMs >= DWELL_HIGH_VALUE_FOREGROUND_MS) {
+      out.push({
+        reason: "content-dwell",
+        note: `engaged ${secs(dwell.foregroundMs)}s with ${rich.primaryType ?? "rich"} page (scroll ${Math.round(dwell.maxScrollPct)}%, ${dwell.interactionCount} interactions)`,
+        richness: rich,
+      });
+    } else if (
+      dwell &&
+      rich.tier === "content" &&
+      dwell.foregroundMs >= DWELL_ENGAGED_FOREGROUND_MS &&
+      dwell.maxScrollPct >= DWELL_ENGAGED_MIN_SCROLL_PCT &&
+      dwell.interactionCount >= DWELL_ENGAGED_MIN_INTERACTIONS
+    ) {
+      // Engaged-content shortcut: deep scroll + interactions on a content
+      // page (article, tweet, video). Even a single observation is worth a
+      // judge call — the user's behavior says they cared.
+      out.push({
+        reason: "content-dwell",
+        note: `deep engagement on ${rich.primaryType ?? "content"} page: ${secs(dwell.foregroundMs)}s, scroll ${Math.round(dwell.maxScrollPct)}%, ${dwell.interactionCount} interactions`,
+        richness: rich,
+      });
+    }
+  }
+
+  // 4. Repetition — same pageKey cluster ≥ N distinct URLs in window.
   //    Runs on every page-dwell and on every nav that has page context
   //    (the post-load / SPA-settled snapshot, NOT the bare webNavigation
   //    notifications). NO richness or duration gate — pure URL-pattern
@@ -211,22 +237,22 @@ export function detectTriggers(input: DetectInput): Trigger[] {
     if (rep) out.push(rep);
   }
 
-  // 4. Action-click — repeated clicks on same element on same host.
+  // 5. Action-click — curated action verb on same host repeated.
   if (event.kind === "click") {
     const ac = detectActionClick(event, input.history, input.recentlyFiredActionClusters);
     if (ac) out.push(ac);
   }
 
-  // 5. Rich-page — any nav-with-pageContext (or page-dwell) on a page that
-  //    has substantive content. No tier subdivision, no routing constraint:
-  //    the LLM reads the page and decides what kind of thing it is and
-  //    whether/where to save it. Content-key deduped so repeat visits
-  //    don't burn tokens.
+  // 6. Rich-page — any nav-with-pageContext (or page-dwell) whose page
+  //    has at least "content"-tier richness. No clustering, no dwell
+  //    requirement; the judge call decides if this artifact belongs in a
+  //    user-approved DB. URL-deduped against recent rich-page fires so
+  //    repeat visits don't burn tokens.
   if (
     event.kind === "page-dwell" ||
     (event.kind === "nav" && event.pageContext)
   ) {
-    const rp = detectRichPage(event, input.recentlyFiredRichKeys);
+    const rp = detectRichPage(event, input.recentlyFiredRichUrls);
     if (rp) out.push(rp);
   }
 
@@ -269,14 +295,17 @@ function detectRepetition(
 
 function detectRichPage(
   event: AppEvent,
-  firedKeys: Set<string>,
+  firedUrls: Set<string>,
 ): Trigger | null {
-  const dedup = richDedupKey(event);
-  if (firedKeys.has(dedup)) return null;
-  if (!hasSubstantiveContent(event.pageContext)) return null;
+  if (firedUrls.has(event.url)) return null;
+  const rich = scoreRichness(event.pageContext);
+  if (rich.tier === "noise") return null;
   return {
     reason: "rich-page",
-    note: `page has substantive content`,
+    note: rich.primaryType
+      ? `rich ${rich.tier} page (${rich.primaryType})`
+      : `rich ${rich.tier} page`,
+    richness: rich,
   };
 }
 
@@ -325,9 +354,17 @@ function hostOfPageKey(pageKey: string): string {
   return pageKey.split("/")[0] ?? "";
 }
 
+function secs(ms: number): number {
+  return Math.round(ms / 1000);
+}
+
 /** Exposed for tests / debugging. */
 export const _internals = {
   TERMINAL_PATH_RE,
+  DWELL_HIGH_VALUE_FOREGROUND_MS,
+  DWELL_ENGAGED_FOREGROUND_MS,
+  DWELL_ENGAGED_MIN_SCROLL_PCT,
+  DWELL_ENGAGED_MIN_INTERACTIONS,
   REPETITION_LOOKBACK_MS,
   REPETITION_MIN_DISTINCT_URLS,
   ACTION_CLICK_WINDOW_MS,

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { send } from "../../lib/messages";
-import type { NotionDatabase } from "../../lib/notion/types";
 
 interface Props {
   onChanged: () => void;
@@ -19,9 +18,6 @@ export function SettingsView({ onChanged }: Props) {
   const [testing, setTesting] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
-  const [autoMaster, setAutoMaster] = useState<boolean>(true);
-  const [autoByDb, setAutoByDb] = useState<Record<string, boolean>>({});
-  const [databases, setDatabases] = useState<NotionDatabase[]>([]);
 
   async function loadStatus() {
     const resp = await send({ t: "getKeyStatus" });
@@ -30,21 +26,8 @@ export function SettingsView({ onChanged }: Props) {
     }
   }
 
-  async function loadAuto() {
-    const [cfg, dbs] = await Promise.all([
-      send({ t: "getAutoApplyConfig" }),
-      send({ t: "notionListDatabases" }),
-    ]);
-    if (cfg.t === "autoApplyConfig") {
-      setAutoMaster(cfg.master);
-      setAutoByDb(cfg.byDb);
-    }
-    if (dbs.t === "notionDatabases") setDatabases(dbs.databases);
-  }
-
   useEffect(() => {
     loadStatus();
-    loadAuto();
   }, []);
 
   async function save() {
@@ -70,22 +53,6 @@ export function SettingsView({ onChanged }: Props) {
     const resp = await send({ t: "testOpenAi" });
     if (resp.t === "testResult") setTestResult({ ok: resp.ok, error: resp.error });
     setTesting(false);
-  }
-
-  async function toggleMaster(next: boolean) {
-    setAutoMaster(next);
-    await send({ t: "setAutoApplyMaster", enabled: next });
-  }
-
-  async function toggleDb(dbId: string, next: boolean) {
-    setAutoByDb((prev) => ({ ...prev, [dbId]: next }));
-    await send({ t: "setAutoApplyForDb", dbId, enabled: next });
-  }
-
-  function autoFor(dbId: string): boolean {
-    if (!autoMaster) return false;
-    if (dbId in autoByDb) return autoByDb[dbId];
-    return true;
   }
 
   return (
@@ -180,85 +147,6 @@ export function SettingsView({ onChanged }: Props) {
           Stored key (chrome.storage.local) takes precedence over the build-time key from <code>.env</code>.
           Without a key, completion detection is disabled.
         </p>
-      </section>
-
-      <section>
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-xs uppercase tracking-wide text-slate-500">Auto-save</h2>
-          <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoMaster}
-              onChange={(e) => toggleMaster(e.target.checked)}
-              className="accent-slate-900"
-            />
-            <span>{autoMaster ? "enabled" : "disabled (all flows require manual approval)"}</span>
-          </label>
-        </div>
-        <div className="rounded-md border border-slate-200 p-3 space-y-2">
-          <p className="text-xs text-slate-600">
-            When a meaningful candidate routes to a Notion database below, it's saved
-            automatically — no prompt — provided the flow is ON. Switch a flow OFF to require
-            manual approval for that destination. Brand-new databases always require manual
-            approval the first time.
-          </p>
-          {databases.length === 0 ? (
-            <p className="text-xs text-slate-400 italic">
-              No databases yet. Once you approve a candidate, its destination database will
-              appear here.
-            </p>
-          ) : (
-            <ul className="divide-y divide-slate-100 -mx-1">
-              {databases.map((db) => {
-                const on = autoFor(db.id);
-                return (
-                  <li
-                    key={db.id}
-                    className="flex items-center justify-between gap-3 px-1 py-1.5"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-sm text-slate-800 truncate font-medium">
-                        {db.name}
-                      </div>
-                      <div className="text-[10px] text-slate-400 tabular-nums">
-                        {db.rowCount} row{db.rowCount === 1 ? "" : "s"}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={on}
-                      disabled={!autoMaster}
-                      onClick={() => toggleDb(db.id, !on)}
-                      className={
-                        "shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition " +
-                        (!autoMaster
-                          ? "bg-slate-200 opacity-50 cursor-not-allowed"
-                          : on
-                            ? "bg-emerald-500"
-                            : "bg-slate-300")
-                      }
-                      title={
-                        !autoMaster
-                          ? "Auto-save is OFF globally"
-                          : on
-                            ? "ON — items skip the prompt and write to this DB"
-                            : "OFF — items require manual approval"
-                      }
-                    >
-                      <span
-                        className={
-                          "inline-block h-4 w-4 transform rounded-full bg-white shadow transition " +
-                          (on ? "translate-x-4" : "translate-x-0.5")
-                        }
-                      />
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
       </section>
 
       <section>
