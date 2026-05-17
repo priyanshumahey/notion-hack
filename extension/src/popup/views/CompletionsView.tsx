@@ -419,6 +419,7 @@ function ReasonBadge({ reason }: { reason: CompletionCandidate["reason"] }) {
     "content-dwell": "bg-teal-100 text-teal-800",
     "repetition": "bg-fuchsia-100 text-fuchsia-800",
     "action-click": "bg-orange-100 text-orange-800",
+    "rich-page": "bg-indigo-100 text-indigo-800",
   };
   return (
     <span

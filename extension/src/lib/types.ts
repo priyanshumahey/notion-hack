@@ -192,7 +192,7 @@ export interface HybridActionOverride {
 export interface CompletionCandidate {
   id: string;
   detectedAt: number;
-  reason: "form-submit" | "terminal-nav" | "content-dwell" | "repetition" | "action-click";
+  reason: "form-submit" | "terminal-nav" | "content-dwell" | "repetition" | "action-click" | "rich-page";
   /** Free-form, human-readable explanation of why the trigger fired. */
   triggerNote?: string;
   trigger: AppEvent;

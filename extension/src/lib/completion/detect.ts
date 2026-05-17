@@ -41,7 +41,8 @@ export type TriggerReason =
   | "terminal-nav"
   | "content-dwell"
   | "repetition"
-  | "action-click";
+  | "action-click"
+  | "rich-page";
 
 export interface Trigger {
   reason: TriggerReason;
@@ -155,6 +156,12 @@ export interface DetectInput {
    * recently — used to throttle.
    */
   recentlyFiredActionClusters: Set<string>;
+  /**
+   * Exact URLs we've already fired a `rich-page` trigger for recently.
+   * Per-URL dedup; prevents re-judging the same recipe page on every
+   * revisit. Owned by ingest, sourced from the completions store.
+   */
+  recentlyFiredRichUrls: Set<string>;
 }
 
 /**
@@ -236,6 +243,19 @@ export function detectTriggers(input: DetectInput): Trigger[] {
     if (ac) out.push(ac);
   }
 
+  // 6. Rich-page — any nav-with-pageContext (or page-dwell) whose page
+  //    has at least "content"-tier richness. No clustering, no dwell
+  //    requirement; the judge call decides if this artifact belongs in a
+  //    user-approved DB. URL-deduped against recent rich-page fires so
+  //    repeat visits don't burn tokens.
+  if (
+    event.kind === "page-dwell" ||
+    (event.kind === "nav" && event.pageContext)
+  ) {
+    const rp = detectRichPage(event, input.recentlyFiredRichUrls);
+    if (rp) out.push(rp);
+  }
+
   return out;
 }
 
@@ -270,6 +290,22 @@ function detectRepetition(
     note: `${urls.length} distinct URLs in cluster "${cluster}" within ${Math.round(REPETITION_LOOKBACK_MS / 86_400_000)} days`,
     clusterKey: cluster,
     clusterUrls: urls,
+  };
+}
+
+function detectRichPage(
+  event: AppEvent,
+  firedUrls: Set<string>,
+): Trigger | null {
+  if (firedUrls.has(event.url)) return null;
+  const rich = scoreRichness(event.pageContext);
+  if (rich.tier === "noise") return null;
+  return {
+    reason: "rich-page",
+    note: rich.primaryType
+      ? `rich ${rich.tier} page (${rich.primaryType})`
+      : `rich ${rich.tier} page`,
+    richness: rich,
   };
 }
 
