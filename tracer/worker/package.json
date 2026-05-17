@@ -1,0 +1,34 @@
+{
+  "name": "@notion-tracer/worker",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Agent tracing on Notion Workers — ingest spans, expose them to Notion AI as tools.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "smoke": "npx --yes tsx scripts/smoke.ts",
+    "smoke:runtime": "npx --yes tsx scripts/smoke-runtime.ts",
+    "smoke:all": "npm run smoke && npm run smoke:runtime",
+    "stress": "npx --yes tsx scripts/stress.ts",
+    "seed": "npx --yes tsx scripts/seed.ts",
+    "trigger": "npx --yes tsx scripts/trigger.ts",
+    "send-event": "npx --yes tsx scripts/sendEvent.ts",
+    "deploy": "ntn workers deploy",
+    "logs": "ntn workers runs list",
+    "webhooks": "ntn workers webhooks list",
+    "tail": "ntn workers runs list --plain"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "@notionhq/workers": "^0.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

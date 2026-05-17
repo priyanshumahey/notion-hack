@@ -1,0 +1,26 @@
+{
+  "name": "@notion-tracer/client",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Client SDK: wrap your agent in tracer.span() and ship spans to the Notion Tracer worker.",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "hello": "tsx examples/hello.ts",
+    "welcome-flow": "tsx examples/welcome-flow.ts",
+    "approval-flow": "tsx examples/approval-flow.ts",
+    "research-agent": "tsx examples/research-agent.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
