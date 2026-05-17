@@ -514,8 +514,6 @@ function labelForCompletionReason(reason: Extract<Msg, { t: "completionPrompt" }
       return "Repeated action pattern";
     case "repetition":
       return "Repeated browsing pattern";
-    case "content-dwell":
-      return "Meaningful page interaction";
     case "form-submit":
       return "Submitted workflow";
     case "terminal-nav":
