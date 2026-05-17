@@ -24,6 +24,10 @@ export default defineConfig(({ mode }) => {
   const notionObservationsDbId = env.NOTION_OBSERVATIONS_DB_ID || "";
   const notionWorkflowsDbId = env.NOTION_WORKFLOWS_DB_ID || "";
   const notionRunsDbId = env.NOTION_RUNS_DB_ID || "";
+  // Job-agent integration: Exa search + the deployed tracer worker.
+  const exaKey = env.EXA_KEY || "";
+  const tracerTriggerUrl = env.TRACER_TRIGGER_URL || "";
+  const tracerIngestSecret = env.TRACER_INGEST_SECRET || "";
   return {
     plugins: [react(), tailwindcss(), crx({ manifest })],
     define: {
@@ -35,6 +39,9 @@ export default defineConfig(({ mode }) => {
       __NOTION_OBSERVATIONS_DB_ID_BUILD__: JSON.stringify(notionObservationsDbId),
       __NOTION_WORKFLOWS_DB_ID_BUILD__: JSON.stringify(notionWorkflowsDbId),
       __NOTION_RUNS_DB_ID_BUILD__: JSON.stringify(notionRunsDbId),
+      __EXA_KEY_BUILD__: JSON.stringify(exaKey),
+      __TRACER_TRIGGER_URL_BUILD__: JSON.stringify(tracerTriggerUrl),
+      __TRACER_INGEST_SECRET_BUILD__: JSON.stringify(tracerIngestSecret),
     },
     server: {
       port: 5173,

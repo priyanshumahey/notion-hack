@@ -5,6 +5,7 @@ import { CompletionsView } from "./views/CompletionsView";
 import { ObservationsView } from "./views/ObservationsView";
 import { WorkflowsView } from "./views/WorkflowsView";
 import { RunsView } from "./views/RunsView";
+import { JobAgentView } from "./views/JobAgentView";
 import { SettingsView } from "./views/SettingsView";
 
 type Tab =
@@ -13,6 +14,7 @@ type Tab =
   | "completions"
   | "workflows"
   | "runs"
+  | "jobs"
   | "settings";
 
 interface NotionStatus {
@@ -98,6 +100,7 @@ export function Popup() {
               "completions",
               "workflows",
               "runs",
+              "jobs",
               "settings",
             ] as Tab[]
           ).map((t) => (
@@ -177,6 +180,7 @@ export function Popup() {
         )}
         {tab === "workflows" && <WorkflowsView />}
         {tab === "runs" && <RunsView />}
+        {tab === "jobs" && <JobAgentView />}
         {tab === "settings" && (
           <SettingsView
             onChanged={() => {

@@ -228,6 +228,176 @@ export function registerSeedSyncs(worker: Worker, dbs: Databases): void {
             Enabled: Builder.checkbox(true),
           },
         },
+        {
+          // Job-hunting agent. Triggered by the Notion Dance extension
+          // when the user has been browsing jobs. Three-stage pipeline:
+          //
+          //   1. queryGen — turn the user's recent job titles into a
+          //      focused Exa search query.
+          //   2. search   — POST that query to Exa, biased toward common
+          //      ATS domains (greenhouse / lever / ashby / wellfound).
+          //   3. parse    — compress Exa's top 5 results into minified
+          //      JSON {leads:[{title,company,url,score}]} so it fits in
+          //      a Notion rich_text property.
+          //   4. persist  — POST one row to the user's `Notion Dance ·
+          //      Agent Picks` DB with the leads JSON inline. The
+          //      extension polls that DB by Run ID and promotes
+          //      individual leads into `Notion Dance · Job Leads`.
+          //
+          // Caller supplies in input:
+          //   - exaKey            : Exa search API key
+          //   - notionToken       : Notion integration token with access
+          //                         to agentPicksDbId
+          //   - agentPicksDbId    : Database ID for `Notion Dance ·
+          //                         Agent Picks`
+          //   - runId             : Caller-generated id, also passed to
+          //                         triggerFunction for idempotency
+          //   - visitedTitles[]   : Recent job titles the user viewed
+          //   - visitedCompanies[]: Companies they were on
+          //   - visitedUrls[]     : URLs to exclude as already-seen
+          //   - locationHint?     : Free-text city/remote preference
+          type: "upsert",
+          key: "job-prospector",
+          properties: {
+            Name: Builder.title("Job Prospector"),
+            "Function Key": Builder.richText("job-prospector"),
+            Description: Builder.richText(
+              "Picks up where a job-search session left off. Generates a " +
+                "tailored Exa query, runs it against ATS domains, compresses " +
+                "the top hits to JSON, and writes one row to the user's " +
+                "`Notion Dance · Agent Picks` DB for the extension to fan " +
+                "out into Job Leads.",
+            ),
+            Sandbox: [Builder.relation("dev-default")],
+            Trigger: Builder.select("webhook"),
+            Definition: Builder.richText(
+              JSON.stringify({
+                steps: [
+                  {
+                    id: "queryGen",
+                    type: "llm",
+                    model: "gpt-4o-mini",
+                    system:
+                      "You generate concise web search queries for job " +
+                      "hunting. Output ONLY the bare search query text " +
+                      "(10-20 words). No quotes, no boolean operators, no " +
+                      "preamble, no explanation.",
+                    prompt:
+                      "Recent job listings this user viewed:\n" +
+                      "${state.input.visitedTitles}\n\n" +
+                      "At these companies:\n" +
+                      "${state.input.visitedCompanies}\n\n" +
+                      "Location preference: ${state.input.locationHint}\n\n" +
+                      "Return ONE focused search query (10-20 words) that " +
+                      "would surface 5-10 similar NEW openings on common " +
+                      "ATS sites (greenhouse, lever, ashby, wellfound). " +
+                      "Output ONLY the query.",
+                    maxTokens: 60,
+                    temperature: 0.3,
+                  },
+                  {
+                    id: "search",
+                    type: "http",
+                    url: "https://api.exa.ai/search",
+                    method: "POST",
+                    headers: {
+                      "x-api-key": "${state.input.exaKey}",
+                      "content-type": "application/json",
+                    },
+                    body: {
+                      query: "${state.queryGen.content}",
+                      numResults: 6,
+                      type: "auto",
+                      includeDomains: [
+                        "boards.greenhouse.io",
+                        "jobs.lever.co",
+                        "jobs.ashbyhq.com",
+                        "wellfound.com",
+                        "ycombinator.com",
+                      ],
+                    },
+                  },
+                  {
+                    id: "parse",
+                    type: "llm",
+                    model: "gpt-4o-mini",
+                    system:
+                      "Extract job leads from Exa search results. Output " +
+                      "ONLY a single-line minified JSON object of shape " +
+                      '{"leads":[{"title":string,"company":string,' +
+                      '"url":string,"score":number}]}. Up to 5 leads. ' +
+                      "Title <=80 chars. Company <=40 chars. Score 0-100 " +
+                      "(your confidence this is a real, applyable role). " +
+                      "Skip aggregator pages. No commentary, no markdown.",
+                    prompt:
+                      "Exa search results:\n${state.search.body}\n\n" +
+                      "Already-viewed URLs to exclude:\n" +
+                      "${state.input.visitedUrls}\n\n" +
+                      "Return the compressed JSON object now.",
+                    maxTokens: 500,
+                    temperature: 0.1,
+                  },
+                  {
+                    id: "persist",
+                    type: "http",
+                    url: "https://api.notion.com/v1/pages",
+                    method: "POST",
+                    headers: {
+                      authorization: "Bearer ${state.input.notionToken}",
+                      "notion-version": "2022-06-28",
+                      "content-type": "application/json",
+                    },
+                    body: {
+                      parent: {
+                        database_id: "${state.input.agentPicksDbId}",
+                      },
+                      properties: {
+                        Name: {
+                          title: [
+                            {
+                              type: "text",
+                              text: { content: "${state.input.runId}" },
+                            },
+                          ],
+                        },
+                        "Run ID": {
+                          rich_text: [
+                            {
+                              type: "text",
+                              text: { content: "${state.input.runId}" },
+                            },
+                          ],
+                        },
+                        Query: {
+                          rich_text: [
+                            {
+                              type: "text",
+                              text: {
+                                content: "${state.queryGen.content}",
+                              },
+                            },
+                          ],
+                        },
+                        Leads: {
+                          rich_text: [
+                            {
+                              type: "text",
+                              text: {
+                                content: "${state.parse.content}",
+                              },
+                            },
+                          ],
+                        },
+                        Status: { select: { name: "ready" } },
+                      },
+                    },
+                  },
+                ],
+              }),
+            ),
+            Enabled: Builder.checkbox(true),
+          },
+        },
       ] as never,
       hasMore: false,
     }),

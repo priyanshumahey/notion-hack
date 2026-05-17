@@ -248,6 +248,80 @@ export interface ObservationsClient {
   listRecentObservations(limit: number): Promise<RecentObservation[]>;
 }
 
+// ---------------------------------------------------------------------------
+// Job-agent integration types.
+//
+// Two new DBs under the user's Notion Dance parent page:
+//   - Notion Dance · Agent Picks   (the tracer worker's inbox — one row per run)
+//   - Notion Dance · Job Leads     (curated leads promoted by the user/extension)
+//
+// Agent Picks rows are written by the deployed `job-prospector` function via
+// the Notion REST API. The extension polls this DB by Run ID, parses the
+// `Leads` JSON, and fans the leads out into Job Leads.
+// ---------------------------------------------------------------------------
+
+/** One lead as extracted by the parse step of `job-prospector`. */
+export interface AgentLead {
+  title: string;
+  company: string;
+  url: string;
+  score: number;
+}
+
+/** A single row of `Notion Dance · Agent Picks`. */
+export interface AgentPickRow {
+  /** Notion page id of the agent picks row. */
+  id: string;
+  /** Caller-supplied run id (extension generated, matches Functions · Runs). */
+  runId: string;
+  /** Status select value (pending|ready|promoted|empty|error). */
+  status: string;
+  /** Free-text query the LLM generated. */
+  query: string;
+  /** Parsed leads from the row's `Leads` rich_text. May be empty if parse failed. */
+  leads: AgentLead[];
+  /** ISO date string when the agent created this row. */
+  createdAt: string;
+  /** notion.so URL for the row. */
+  url: string;
+}
+
+/** Input for a single row write to `Notion Dance · Job Leads`. */
+export interface JobLeadInput {
+  /** Title shown in the DB. */
+  title: string;
+  company: string;
+  url: string;
+  score: number;
+  /** Where this lead came from. */
+  source: "visited" | "agent";
+  /** ISO time the lead was discovered. */
+  foundAt: number;
+  /** Optional ref back to the originating Agent Picks row. */
+  agentPickId?: string;
+  /** Optional ref back to the originating Tracer run. */
+  runId?: string;
+}
+
+export interface JobLeadRecord {
+  id: string;
+  url: string;
+}
+
+export interface RecentJobLead {
+  id: string;
+  /** notion.so URL of the Job Leads row. */
+  url: string;
+  title: string;
+  company: string;
+  /** Original job posting URL (the URL prop on the row, NOT the Notion URL). */
+  sourceUrl: string;
+  score: number;
+  source: string;
+  status: string;
+  foundAt: number;
+}
+
 export class NotionGatewayError extends Error {
   constructor(public code: string, message: string) {
     super(message);

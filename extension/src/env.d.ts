@@ -7,3 +7,6 @@ declare const __NOTION_WORKSPACE_NAME_BUILD__: string;
 declare const __NOTION_OBSERVATIONS_DB_ID_BUILD__: string;
 declare const __NOTION_WORKFLOWS_DB_ID_BUILD__: string;
 declare const __NOTION_RUNS_DB_ID_BUILD__: string;
+declare const __EXA_KEY_BUILD__: string;
+declare const __TRACER_TRIGGER_URL_BUILD__: string;
+declare const __TRACER_INGEST_SECRET_BUILD__: string;

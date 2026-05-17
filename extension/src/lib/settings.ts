@@ -19,7 +19,12 @@ const KEYS = {
   notionObservationsDbId: "notionObservationsDbId",
   notionWorkflowsDbId: "notionWorkflowsDbId",
   notionRunsDbId: "notionRunsDbId",
+  notionAgentPicksDbId: "notionAgentPicksDbId",
+  notionJobLeadsDbId: "notionJobLeadsDbId",
   autoApply: "autoApply",
+  exaKey: "exaKey",
+  tracerTriggerUrl: "tracerTriggerUrl",
+  tracerIngestSecret: "tracerIngestSecret",
 } as const;
 
 export interface Settings {
@@ -37,6 +42,9 @@ export interface NotionConnection {
   observationsDbId: string;
   workflowsDbId: string;
   runsDbId: string;
+  /** Set only after the job-agent feature has provisioned its DBs. */
+  agentPicksDbId: string;
+  jobLeadsDbId: string;
   /** Token redacted for display. */
   redactedToken: string;
 }
@@ -70,6 +78,8 @@ function buildNotionBootstrap(): BootstrapState {
       observationsDbId: safe(__NOTION_OBSERVATIONS_DB_ID_BUILD__),
       workflowsDbId: safe(__NOTION_WORKFLOWS_DB_ID_BUILD__),
       runsDbId: safe(__NOTION_RUNS_DB_ID_BUILD__),
+      agentPicksDbId: "",
+      jobLeadsDbId: "",
     };
   } catch {
     return {
@@ -79,7 +89,40 @@ function buildNotionBootstrap(): BootstrapState {
       observationsDbId: "",
       workflowsDbId: "",
       runsDbId: "",
+      agentPicksDbId: "",
+      jobLeadsDbId: "",
     };
+  }
+}
+
+/** Build-time fallback for the Exa search API key. May be "". */
+function buildExaKey(): string {
+  try {
+    return typeof __EXA_KEY_BUILD__ === "string" ? __EXA_KEY_BUILD__ : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Build-time fallback for the tracer worker's triggerFunction webhook URL. */
+function buildTracerTriggerUrl(): string {
+  try {
+    return typeof __TRACER_TRIGGER_URL_BUILD__ === "string"
+      ? __TRACER_TRIGGER_URL_BUILD__
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Build-time fallback for the tracer ingest HMAC secret. */
+function buildTracerIngestSecret(): string {
+  try {
+    return typeof __TRACER_INGEST_SECRET_BUILD__ === "string"
+      ? __TRACER_INGEST_SECRET_BUILD__
+      : "";
+  } catch {
+    return "";
   }
 }
 
@@ -158,6 +201,10 @@ export interface BootstrapState {
   observationsDbId: string;
   workflowsDbId: string;
   runsDbId: string;
+  /** Job-agent inbox DB. Empty until the user runs the agent at least once. */
+  agentPicksDbId: string;
+  /** Curated Job Leads DB. Empty until first agent run. */
+  jobLeadsDbId: string;
 }
 
 export async function getBootstrapState(): Promise<BootstrapState> {
@@ -168,6 +215,8 @@ export async function getBootstrapState(): Promise<BootstrapState> {
     KEYS.notionObservationsDbId,
     KEYS.notionWorkflowsDbId,
     KEYS.notionRunsDbId,
+    KEYS.notionAgentPicksDbId,
+    KEYS.notionJobLeadsDbId,
   ]);
   const fb = buildNotionBootstrap();
   // Per-field fallback: a user can override just one field via the UI
@@ -185,6 +234,10 @@ export async function getBootstrapState(): Promise<BootstrapState> {
     workflowsDbId:
       ((r[KEYS.notionWorkflowsDbId] as string | undefined) ?? "") || fb.workflowsDbId,
     runsDbId: ((r[KEYS.notionRunsDbId] as string | undefined) ?? "") || fb.runsDbId,
+    agentPicksDbId:
+      ((r[KEYS.notionAgentPicksDbId] as string | undefined) ?? "") || fb.agentPicksDbId,
+    jobLeadsDbId:
+      ((r[KEYS.notionJobLeadsDbId] as string | undefined) ?? "") || fb.jobLeadsDbId,
   };
 }
 
@@ -197,6 +250,9 @@ export async function setBootstrapState(s: Partial<BootstrapState>): Promise<voi
     patch[KEYS.notionObservationsDbId] = s.observationsDbId;
   if (s.workflowsDbId !== undefined) patch[KEYS.notionWorkflowsDbId] = s.workflowsDbId;
   if (s.runsDbId !== undefined) patch[KEYS.notionRunsDbId] = s.runsDbId;
+  if (s.agentPicksDbId !== undefined)
+    patch[KEYS.notionAgentPicksDbId] = s.agentPicksDbId;
+  if (s.jobLeadsDbId !== undefined) patch[KEYS.notionJobLeadsDbId] = s.jobLeadsDbId;
   if (Object.keys(patch).length) await chrome.storage.local.set(patch);
 }
 
@@ -210,6 +266,8 @@ export async function clearNotionConnection(): Promise<void> {
     KEYS.notionObservationsDbId,
     KEYS.notionWorkflowsDbId,
     KEYS.notionRunsDbId,
+    KEYS.notionAgentPicksDbId,
+    KEYS.notionJobLeadsDbId,
   ]);
 }
 
@@ -230,6 +288,8 @@ export async function getNotionConnection(): Promise<NotionConnection> {
     observationsDbId: b.observationsDbId,
     workflowsDbId: b.workflowsDbId,
     runsDbId: b.runsDbId,
+    agentPicksDbId: b.agentPicksDbId,
+    jobLeadsDbId: b.jobLeadsDbId,
     redactedToken: redactKey(token),
   };
 }
@@ -263,4 +323,76 @@ export async function setAutoApplyEnabled(enabled: boolean): Promise<void> {
   } else {
     await chrome.storage.local.remove([KEYS.autoApply]);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Job-agent integration: Exa search + tracer-worker triggerFunction webhook.
+// All three values follow the same resolution rule as the OpenAI key:
+// chrome.storage.local wins; otherwise fall back to the value baked at build
+// time from `extension/.env`.
+// ---------------------------------------------------------------------------
+
+export async function getExaKey(): Promise<string> {
+  const r = await chrome.storage.local.get([KEYS.exaKey]);
+  const stored = (r[KEYS.exaKey] as string | undefined) ?? "";
+  return stored || buildExaKey();
+}
+
+export async function setExaKey(key: string): Promise<void> {
+  const trimmed = key.trim();
+  if (trimmed) {
+    await chrome.storage.local.set({ [KEYS.exaKey]: trimmed });
+  } else {
+    await chrome.storage.local.remove([KEYS.exaKey]);
+  }
+}
+
+export async function getTracerTriggerUrl(): Promise<string> {
+  const r = await chrome.storage.local.get([KEYS.tracerTriggerUrl]);
+  const stored = (r[KEYS.tracerTriggerUrl] as string | undefined) ?? "";
+  return stored || buildTracerTriggerUrl();
+}
+
+export async function setTracerTriggerUrl(url: string): Promise<void> {
+  const trimmed = url.trim();
+  if (trimmed) {
+    await chrome.storage.local.set({ [KEYS.tracerTriggerUrl]: trimmed });
+  } else {
+    await chrome.storage.local.remove([KEYS.tracerTriggerUrl]);
+  }
+}
+
+export async function getTracerIngestSecret(): Promise<string> {
+  const r = await chrome.storage.local.get([KEYS.tracerIngestSecret]);
+  const stored = (r[KEYS.tracerIngestSecret] as string | undefined) ?? "";
+  return stored || buildTracerIngestSecret();
+}
+
+export async function setTracerIngestSecret(secret: string): Promise<void> {
+  const trimmed = secret.trim();
+  if (trimmed) {
+    await chrome.storage.local.set({ [KEYS.tracerIngestSecret]: trimmed });
+  } else {
+    await chrome.storage.local.remove([KEYS.tracerIngestSecret]);
+  }
+}
+
+/** True iff EVERY value needed to run the job agent end-to-end is present. */
+export async function isJobAgentReady(): Promise<boolean> {
+  const [exa, url, secret, notion, b] = await Promise.all([
+    getExaKey(),
+    getTracerTriggerUrl(),
+    getTracerIngestSecret(),
+    getNotionToken(),
+    getBootstrapState(),
+  ]);
+  return !!(
+    exa &&
+    url &&
+    secret &&
+    notion &&
+    b.parentPageId &&
+    b.agentPicksDbId &&
+    b.jobLeadsDbId
+  );
 }

@@ -179,30 +179,56 @@ export async function applyCandidate(
       values: coerced.values,
     });
 
-    // 4. Workflow row — best effort, non-fatal.
+    // 4. Workflow row — find-or-create, best effort, non-fatal.
+    //
+    // For the SAME (canonical workflow name, target DB), reuse the existing
+    // ACTIVE workflow row instead of inserting a duplicate: bump Run Count,
+    // refresh Last Triggered, union Source Apps. Without this every
+    // confirmed save spawns a fresh "Save → Saved Jobs"-style row even when
+    // the judge correctly identified the policy as already-approved.
     let workflowPageId = "";
     let workflowPageUrl = "";
     try {
       const wfName = inferWorkflowName(prop.database.name, candidate);
-      const wf = await client.writeWorkflow({
-        name: wfName,
-        status: "active",
-        triggerSpec: buildTriggerSpec(candidate),
-        sourceApps: uniqHosts(candidate),
-        targetDatabaseId: dbId,
-        targetDatabaseName: dbName,
-        extractionSchema: { properties: dbSchema },
-        runMode: "ask-each-time",
-        confidenceFloor: candidate.judgement.confidence ?? 0.6,
-        reasoning: candidate.judgement.reasoning ?? "",
-        sourceCandidateId: candidate.id,
-        sourceLocalEventIds: candidate.context.map((e) => e.id),
-        approvedAt: Date.now(),
-      });
-      workflowPageId = wf.id;
-      workflowPageUrl = wf.url;
+      const newHosts = uniqHosts(candidate);
+      const existingWf = await client.findActiveWorkflowForTarget(wfName, dbId);
+      if (existingWf) {
+        workflowPageId = existingWf.id;
+        workflowPageUrl = existingWf.url;
+        await client.incrementWorkflowRun({
+          workflowPageId: existingWf.id,
+          prevRunCount: existingWf.runCount,
+          prevSourceApps: existingWf.sourceApps,
+          newSourceApps: newHosts,
+          triggeredAt: candidate.detectedAt,
+        });
+        log(
+          "apply: reusing existing workflow",
+          existingWf.id,
+          wfName,
+          `runCount=${existingWf.runCount + 1}`,
+        );
+      } else {
+        const wf = await client.writeWorkflow({
+          name: wfName,
+          status: "active",
+          triggerSpec: buildTriggerSpec(candidate),
+          sourceApps: newHosts,
+          targetDatabaseId: dbId,
+          targetDatabaseName: dbName,
+          extractionSchema: { properties: dbSchema },
+          runMode: "ask-each-time",
+          confidenceFloor: candidate.judgement.confidence ?? 0.6,
+          reasoning: candidate.judgement.reasoning ?? "",
+          sourceCandidateId: candidate.id,
+          sourceLocalEventIds: candidate.context.map((e) => e.id),
+          approvedAt: Date.now(),
+        });
+        workflowPageId = wf.id;
+        workflowPageUrl = wf.url;
+      }
     } catch (e) {
-      log.warn("apply: workflow write failed", (e as Error).message);
+      log.warn("apply: workflow write/increment failed", (e as Error).message);
     }
 
     // 5. Run row — best effort, non-fatal.

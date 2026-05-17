@@ -10,7 +10,10 @@ import type {
   RecentObservation,
   RecentWorkflow,
   RecentRun,
+  AgentPickRow,
+  RecentJobLead,
 } from "./notion/types";
+import type { JobAgentStatus } from "../background/job-agent";
 
 export type Msg =
   // content → bg
@@ -51,6 +54,11 @@ export type Msg =
   | { t: "notionListObservations"; limit: number }
   | { t: "notionListWorkflows"; limit: number }
   | { t: "notionListRuns"; limit: number }
+  // popup → bg : job agent (tracer-resident)
+  | { t: "jobAgentStatus" }
+  | { t: "jobAgentRun"; locationHint?: string }
+  | { t: "jobAgentListLeads"; limit: number }
+  | { t: "jobAgentListPicks"; limit: number }
   // popup → bg : settings / health
   | { t: "getKeyStatus" }
   | { t: "setOpenAiKey"; key: string }
@@ -91,6 +99,9 @@ export type MsgResponse =
   | { t: "notionObservations"; observations: RecentObservation[] }
   | { t: "notionWorkflows"; workflows: RecentWorkflow[] }
   | { t: "notionRuns"; runs: RecentRun[] }
+  | { t: "jobAgentStatus"; status: JobAgentStatus }
+  | { t: "jobAgentLeads"; leads: RecentJobLead[] }
+  | { t: "jobAgentPicks"; picks: AgentPickRow[] }
   | { t: "keyStatus"; hasKey: boolean; source: "stored" | "build" | "none"; redacted: string }
   | { t: "testResult"; ok: boolean; error?: string; detail?: string }
   | { t: "autoApply"; enabled: boolean }

@@ -32,6 +32,11 @@ import type {
   WorkflowRecord,
   RunInput,
   RunRecord,
+  AgentLead,
+  AgentPickRow,
+  JobLeadInput,
+  JobLeadRecord,
+  RecentJobLead,
 } from "./types";
 import { NotionGatewayError } from "./types";
 import type { NotionPropertyValue } from "./types";
@@ -48,6 +53,8 @@ const API_VERSION = "2022-06-28";
 const OBSERVATIONS_DB_NAME = "Notion Dance · Observations";
 const WORKFLOWS_DB_NAME = "Notion Dance · Workflows";
 const RUNS_DB_NAME = "Notion Dance · Runs";
+const AGENT_PICKS_DB_NAME = "Notion Dance · Agent Picks";
+const JOB_LEADS_DB_NAME = "Notion Dance · Job Leads";
 
 // Retry policy for transient errors (429 / 5xx). Capped low — fire-and-forget
 // observation writes shouldn't pile up retries during a Notion outage.
@@ -101,6 +108,26 @@ const RUN_USER_RESPONSE_OPTIONS = [
   { name: "n/a", color: "gray" },
 ] as const;
 
+const AGENT_PICK_STATUS_OPTIONS = [
+  { name: "pending", color: "gray" },
+  { name: "ready", color: "blue" },
+  { name: "promoted", color: "green" },
+  { name: "empty", color: "yellow" },
+  { name: "error", color: "red" },
+] as const;
+
+const JOB_LEAD_SOURCE_OPTIONS = [
+  { name: "visited", color: "blue" },
+  { name: "agent", color: "purple" },
+] as const;
+
+const JOB_LEAD_STATUS_OPTIONS = [
+  { name: "new", color: "default" },
+  { name: "reviewed", color: "blue" },
+  { name: "applied", color: "green" },
+  { name: "archived", color: "gray" },
+] as const;
+
 interface ApiOpts {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
@@ -114,6 +141,8 @@ export class RealObservationsClient implements ObservationsClient {
     private workflowsDbId: string,
     private runsDbId: string,
     private readonly cachedWorkspaceName: string = "",
+    private agentPicksDbId: string = "",
+    private jobLeadsDbId: string = "",
   ) {}
 
   workspaceName(): string {
@@ -122,6 +151,14 @@ export class RealObservationsClient implements ObservationsClient {
 
   setObservationsDbId(id: string): void {
     this.observationsDbId = id || "";
+  }
+
+  setAgentPicksDbId(id: string): void {
+    this.agentPicksDbId = id || "";
+  }
+
+  setJobLeadsDbId(id: string): void {
+    this.jobLeadsDbId = id || "";
   }
 
   setWorkflowsDbId(id: string): void {
@@ -258,6 +295,171 @@ export class RealObservationsClient implements ObservationsClient {
       workflowsDbId: w.workflowsDbId,
       runsDbId: r.runsDbId,
     };
+  }
+
+  // ---- Job-agent DBs (Agent Picks + Job Leads) -------------------------
+
+  async bootstrapAgentPicks(
+    parentPageId: string,
+  ): Promise<{ agentPicksDbId: string }> {
+    if (!parentPageId) {
+      throw new NotionGatewayError("validation_error", "parentPageId required");
+    }
+    const existing = await this.findChildDatabase(parentPageId, AGENT_PICKS_DB_NAME);
+    if (existing) {
+      log("bootstrap: reusing existing agent picks db", existing.id);
+      this.agentPicksDbId = existing.id;
+      return { agentPicksDbId: existing.id };
+    }
+    const created = await this.api<NotionDatabaseRaw>("/databases", {
+      method: "POST",
+      body: {
+        parent: { type: "page_id", page_id: parentPageId },
+        title: [{ type: "text", text: { content: AGENT_PICKS_DB_NAME } }],
+        properties: agentPicksSchemaPayload(),
+      },
+    });
+    log("bootstrap: created agent picks db", created.id);
+    this.agentPicksDbId = created.id;
+    return { agentPicksDbId: created.id };
+  }
+
+  async bootstrapJobLeads(
+    parentPageId: string,
+  ): Promise<{ jobLeadsDbId: string }> {
+    if (!parentPageId) {
+      throw new NotionGatewayError("validation_error", "parentPageId required");
+    }
+    const existing = await this.findChildDatabase(parentPageId, JOB_LEADS_DB_NAME);
+    if (existing) {
+      log("bootstrap: reusing existing job leads db", existing.id);
+      this.jobLeadsDbId = existing.id;
+      return { jobLeadsDbId: existing.id };
+    }
+    const created = await this.api<NotionDatabaseRaw>("/databases", {
+      method: "POST",
+      body: {
+        parent: { type: "page_id", page_id: parentPageId },
+        title: [{ type: "text", text: { content: JOB_LEADS_DB_NAME } }],
+        properties: jobLeadsSchemaPayload(),
+      },
+    });
+    log("bootstrap: created job leads db", created.id);
+    this.jobLeadsDbId = created.id;
+    return { jobLeadsDbId: created.id };
+  }
+
+  /** Bootstrap both job-agent DBs in one call. Idempotent. */
+  async bootstrapJobAgent(
+    parentPageId: string,
+  ): Promise<{ agentPicksDbId: string; jobLeadsDbId: string }> {
+    const a = await this.bootstrapAgentPicks(parentPageId);
+    const j = await this.bootstrapJobLeads(parentPageId);
+    return { agentPicksDbId: a.agentPicksDbId, jobLeadsDbId: j.jobLeadsDbId };
+  }
+
+  /** Look up an Agent Picks row by its Run ID property. Returns null if not found. */
+  async findAgentPickByRunId(runId: string): Promise<AgentPickRow | null> {
+    if (!this.agentPicksDbId || !runId) return null;
+    const res = await this.api<NotionQueryResponse>(
+      `/databases/${this.agentPicksDbId}/query`,
+      {
+        method: "POST",
+        body: {
+          filter: { property: "Run ID", rich_text: { equals: runId } },
+          page_size: 1,
+        },
+      },
+    );
+    const row = res.results?.[0];
+    if (!row) return null;
+    return rowToAgentPick(row);
+  }
+
+  /** Most recent Agent Picks rows, newest first. */
+  async listAgentPicks(limit: number): Promise<AgentPickRow[]> {
+    if (!this.agentPicksDbId) return [];
+    const pageSize = Math.min(Math.max(limit, 1), 50);
+    const res = await this.api<NotionQueryResponse>(
+      `/databases/${this.agentPicksDbId}/query`,
+      {
+        method: "POST",
+        body: {
+          page_size: pageSize,
+          sorts: [{ timestamp: "created_time", direction: "descending" }],
+        },
+      },
+    );
+    return (res.results ?? []).map(rowToAgentPick);
+  }
+
+  /** PATCH an Agent Picks row's Status (e.g. ready → promoted). */
+  async markAgentPickStatus(
+    agentPickId: string,
+    status: "pending" | "ready" | "promoted" | "empty" | "error",
+  ): Promise<void> {
+    if (!agentPickId) return;
+    try {
+      await this.api(`/pages/${agentPickId}`, {
+        method: "PATCH",
+        body: { properties: { Status: { select: { name: status } } } },
+      });
+    } catch (e) {
+      log.warn("markAgentPickStatus: PATCH failed", agentPickId, (e as Error).message);
+    }
+  }
+
+  async createJobLead(input: JobLeadInput): Promise<JobLeadRecord | null> {
+    if (!this.jobLeadsDbId) {
+      log.warn("createJobLead: no job leads db id; skipping");
+      return null;
+    }
+    // Dedup on source URL — clicking "Save" twice on the same lead should
+    // not produce duplicate rows.
+    if (/^https?:\/\//i.test(input.url)) {
+      try {
+        const existing = await this.api<NotionQueryResponse>(
+          `/databases/${this.jobLeadsDbId}/query`,
+          {
+            method: "POST",
+            body: {
+              filter: { property: "URL", url: { equals: input.url } },
+              page_size: 1,
+            },
+          },
+        );
+        const hit = existing.results?.[0];
+        if (hit) {
+          log("createJobLead: dedup hit", input.url, hit.id);
+          return { id: hit.id, url: hit.url ?? "" };
+        }
+      } catch (e) {
+        log.warn("createJobLead: dedup query failed", (e as Error).message);
+      }
+    }
+    const props = jobLeadToProperties(input);
+    const page = await this.api<NotionPageRaw>("/pages", {
+      method: "POST",
+      body: { parent: { database_id: this.jobLeadsDbId }, properties: props },
+    });
+    log("job lead written", page.id, input.title);
+    return { id: page.id, url: page.url ?? "" };
+  }
+
+  async listJobLeads(limit: number): Promise<RecentJobLead[]> {
+    if (!this.jobLeadsDbId) return [];
+    const pageSize = Math.min(Math.max(limit, 1), 50);
+    const res = await this.api<NotionQueryResponse>(
+      `/databases/${this.jobLeadsDbId}/query`,
+      {
+        method: "POST",
+        body: {
+          page_size: pageSize,
+          sorts: [{ property: "Found At", direction: "descending" }],
+        },
+      },
+    );
+    return (res.results ?? []).map(rowToJobLead);
   }
 
   async createObservation(input: ObservationInput): Promise<ObservationRecord | null> {
@@ -528,6 +730,106 @@ export class RealObservationsClient implements ObservationsClient {
     return (res.results ?? []).map(rowToWorkflow);
   }
 
+  /**
+   * Find an existing ACTIVE workflow that targets the same destination DB
+   * with the same canonical name. Returned to the apply path so we can
+   * increment Run Count + union Source Apps instead of creating a duplicate
+   * workflow row.
+   *
+   * Matching key: (name, Target Database Id, status=active). Name is built
+   * deterministically by inferWorkflowName(reason, dbName) — different
+   * trigger reasons targeting the same DB therefore remain distinct
+   * policies (e.g. "Save → Saved Jobs" vs "Save read → Saved Jobs"), but
+   * repeated saves of the same kind to the same DB fold together.
+   *
+   * If multiple matches exist (legacy duplicate state), return the OLDEST
+   * by Approved At — that's the row to keep growing. The remaining
+   * duplicates can be archived manually.
+   */
+  async findActiveWorkflowForTarget(
+    name: string,
+    targetDatabaseId: string,
+  ): Promise<RecentWorkflow | null> {
+    if (!this.workflowsDbId) return null;
+    if (!targetDatabaseId || !name.trim()) return null;
+    try {
+      const res = await this.api<NotionQueryResponse>(
+        `/databases/${this.workflowsDbId}/query`,
+        {
+          method: "POST",
+          body: {
+            page_size: 10,
+            filter: {
+              and: [
+                { property: "Name", title: { equals: name } },
+                {
+                  property: "Target Database Id",
+                  rich_text: { equals: targetDatabaseId },
+                },
+                { property: "Status", select: { equals: "active" } },
+              ],
+            },
+            // Oldest first — the workflow with the longest history wins.
+            sorts: [{ property: "Approved At", direction: "ascending" }],
+          },
+        },
+      );
+      const hits = (res.results ?? []).map(rowToWorkflow);
+      return hits[0] ?? null;
+    } catch (e) {
+      // Fall through — apply path will create as a new workflow. Worse than
+      // ideal but not data-corrupting.
+      log.warn("findActiveWorkflowForTarget failed", (e as Error).message);
+      return null;
+    }
+  }
+
+  /**
+   * PATCH an existing workflow row to record a fresh run:
+   *   - Run Count += 1
+   *   - Last Triggered = now
+   *   - Source Apps unioned with the new run's hosts (capped 20)
+   *
+   * Reasoning is intentionally NOT overwritten — the original LLM
+   * justification stays as the workflow's stable description; the moving
+   * parts are confined to counters and hosts.
+   */
+  async incrementWorkflowRun(args: {
+    workflowPageId: string;
+    prevRunCount: number;
+    prevSourceApps: string[];
+    newSourceApps: string[];
+    triggeredAt: number;
+  }): Promise<void> {
+    if (!args.workflowPageId) return;
+    const union = new Set<string>();
+    for (const s of args.prevSourceApps) if (s) union.add(s);
+    for (const s of args.newSourceApps) if (s) union.add(s);
+    const merged = Array.from(union).slice(0, 20);
+    try {
+      await this.api(`/pages/${args.workflowPageId}`, {
+        method: "PATCH",
+        body: {
+          properties: {
+            "Run Count": { number: (args.prevRunCount || 0) + 1 },
+            "Last Triggered": {
+              date: { start: new Date(args.triggeredAt).toISOString() },
+            },
+            "Source Apps": {
+              multi_select: merged.map((s) => ({ name: clip(s, 100) })),
+            },
+          },
+        },
+      });
+    } catch (e) {
+      log.warn(
+        "incrementWorkflowRun PATCH failed",
+        args.workflowPageId,
+        (e as Error).message,
+      );
+    }
+  }
+
   // ---- Runs -------------------------------------------------------------
 
   async writeRun(input: RunInput): Promise<RunRecord> {
@@ -765,6 +1067,8 @@ let cached: {
   observationsDbId: string;
   workflowsDbId: string;
   runsDbId: string;
+  agentPicksDbId: string;
+  jobLeadsDbId: string;
 } | null = null;
 
 /** Returns null when no token is configured. */
@@ -779,7 +1083,9 @@ export async function getObservationsClient(): Promise<RealObservationsClient | 
     cached.token === token &&
     cached.observationsDbId === b.observationsDbId &&
     cached.workflowsDbId === b.workflowsDbId &&
-    cached.runsDbId === b.runsDbId
+    cached.runsDbId === b.runsDbId &&
+    cached.agentPicksDbId === b.agentPicksDbId &&
+    cached.jobLeadsDbId === b.jobLeadsDbId
   ) {
     return cached.client;
   }
@@ -789,6 +1095,8 @@ export async function getObservationsClient(): Promise<RealObservationsClient | 
     b.workflowsDbId,
     b.runsDbId,
     b.workspaceName,
+    b.agentPicksDbId,
+    b.jobLeadsDbId,
   );
   cached = {
     client,
@@ -796,6 +1104,8 @@ export async function getObservationsClient(): Promise<RealObservationsClient | 
     observationsDbId: b.observationsDbId,
     workflowsDbId: b.workflowsDbId,
     runsDbId: b.runsDbId,
+    agentPicksDbId: b.agentPicksDbId,
+    jobLeadsDbId: b.jobLeadsDbId,
   };
   return client;
 }
@@ -861,6 +1171,31 @@ function runsSchemaPayload(): Record<string, unknown> {
     Extracted: { rich_text: {} },
     Error: { rich_text: {} },
     "Latency Ms": { number: { format: "number" } },
+  };
+}
+
+function agentPicksSchemaPayload(): Record<string, unknown> {
+  return {
+    Name: { title: {} },
+    "Run ID": { rich_text: {} },
+    Query: { rich_text: {} },
+    Leads: { rich_text: {} },
+    Status: { select: { options: AGENT_PICK_STATUS_OPTIONS.map((o) => ({ ...o })) } },
+    "Found At": { date: {} },
+  };
+}
+
+function jobLeadsSchemaPayload(): Record<string, unknown> {
+  return {
+    Title: { title: {} },
+    Company: { rich_text: {} },
+    URL: { url: {} },
+    Score: { number: { format: "number" } },
+    Source: { select: { options: JOB_LEAD_SOURCE_OPTIONS.map((o) => ({ ...o })) } },
+    Status: { select: { options: JOB_LEAD_STATUS_OPTIONS.map((o) => ({ ...o })) } },
+    "Found At": { date: {} },
+    "Agent Pick Id": { rich_text: {} },
+    "Run ID": { rich_text: {} },
   };
 }
 
@@ -959,6 +1294,8 @@ interface NotionDatabaseRaw {
 interface NotionPageRaw {
   id: string;
   url?: string;
+  /** ISO timestamp when the row was created. Used as a fallback ordering field. */
+  created_time?: string;
   properties?: Record<string, NotionRowPropRaw>;
 }
 
@@ -1240,6 +1577,11 @@ function extractDatabaseTitleFull(raw: NotionDatabaseFullRaw): string {
 // ---------------------------------------------------------------------------
 
 function workflowToProperties(w: WorkflowInput): Record<string, unknown> {
+  // A workflow row is only ever created at the moment its first run
+  // succeeds (see apply.ts step 4) — so Run Count starts at 1 and
+  // Last Triggered mirrors Approved At. Subsequent runs against the same
+  // (name, target_db) bump the existing row via incrementWorkflowRun
+  // rather than inserting a duplicate.
   return {
     Name: { title: [{ type: "text", text: { content: clip(w.name || "(workflow)", 200) } }] },
     Status: { select: { name: w.status } },
@@ -1258,7 +1600,8 @@ function workflowToProperties(w: WorkflowInput): Record<string, unknown> {
     "Source Candidate Id": rich(w.sourceCandidateId),
     "Source Local Event Ids": rich(w.sourceLocalEventIds.slice(0, 50).join(",")),
     "Approved At": { date: { start: new Date(w.approvedAt).toISOString() } },
-    "Run Count": { number: 0 },
+    "Last Triggered": { date: { start: new Date(w.approvedAt).toISOString() } },
+    "Run Count": { number: 1 },
   };
 }
 
@@ -1316,6 +1659,89 @@ function rowToRun(row: NotionPageRaw): RecentRun {
     latencyMs: readNumber(p["Latency Ms"]),
     error: readRichText(p.Error),
   };
+}
+
+function jobLeadToProperties(j: JobLeadInput): Record<string, unknown> {
+  const props: Record<string, unknown> = {
+    Title: {
+      title: [{ type: "text", text: { content: clip(j.title || "(lead)", 200) } }],
+    },
+    Company: rich(j.company || ""),
+    Source: { select: { name: j.source } },
+    Status: { select: { name: "new" } },
+    "Found At": { date: { start: new Date(j.foundAt).toISOString() } },
+  };
+  if (/^https?:\/\//i.test(j.url)) {
+    props.URL = { url: clip(j.url, TEXT_MAX) };
+  }
+  if (Number.isFinite(j.score)) {
+    props.Score = { number: j.score };
+  }
+  if (j.agentPickId) props["Agent Pick Id"] = rich(j.agentPickId);
+  if (j.runId) props["Run ID"] = rich(j.runId);
+  return props;
+}
+
+function rowToJobLead(row: NotionPageRaw): RecentJobLead {
+  const p = row.properties ?? {};
+  return {
+    id: row.id,
+    url: row.url ?? "",
+    title: readTitle(p.Title) || "(lead)",
+    company: readRichText(p.Company),
+    sourceUrl: readUrl(p.URL),
+    score: readNumber(p.Score) ?? 0,
+    source: readSelect(p.Source),
+    status: readSelect(p.Status),
+    foundAt: readDate(p["Found At"]),
+  };
+}
+
+function rowToAgentPick(row: NotionPageRaw): AgentPickRow {
+  const p = row.properties ?? {};
+  const leadsJson = readRichText(p.Leads);
+  let leads: AgentLead[] = [];
+  if (leadsJson) {
+    try {
+      const parsed = JSON.parse(leadsJson);
+      const arr = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.leads)
+          ? parsed.leads
+          : [];
+      leads = arr
+        .map((x: unknown) => coerceAgentLead(x))
+        .filter((x: AgentLead | null): x is AgentLead => x !== null);
+    } catch (e) {
+      log.warn("rowToAgentPick: leads JSON parse failed", (e as Error).message);
+    }
+  }
+  return {
+    id: row.id,
+    url: row.url ?? "",
+    runId: readRichText(p["Run ID"]),
+    status: readSelect(p.Status),
+    query: readRichText(p.Query),
+    leads,
+    createdAt: readDateIso(p["Found At"]) || row.created_time || "",
+  };
+}
+
+function coerceAgentLead(v: unknown): AgentLead | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const url = typeof o.url === "string" ? o.url : "";
+  if (!/^https?:\/\//i.test(url)) return null;
+  return {
+    title: typeof o.title === "string" ? o.title : "",
+    company: typeof o.company === "string" ? o.company : "",
+    url,
+    score: typeof o.score === "number" ? o.score : 0,
+  };
+}
+
+function readDateIso(p: NotionRowPropRaw | undefined): string {
+  return p?.date?.start ?? "";
 }
 
 function readRichText(p: NotionRowPropRaw | undefined): string {

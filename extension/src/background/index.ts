@@ -17,6 +17,12 @@ import { canonicalizeUrl } from "../lib/canonicalize";
 import { newId } from "../lib/ids";
 import { ingest, retryJudge, resetIngestState } from "./ingest";
 import { applyCandidate, denyCandidate } from "./apply";
+import {
+  getJobAgentStatus,
+  listAgentPicks,
+  listJobLeads,
+  runJobAgent,
+} from "./job-agent";
 import { getNotionGateway } from "../lib/notion/gateway";
 import {
   getObservationsClient,
@@ -471,6 +477,28 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
         log.error("notion list runs failed", (e as Error).message);
         return { t: "error", message: (e as Error).message };
       }
+    }
+    case "jobAgentStatus": {
+      return { t: "jobAgentStatus", status: getJobAgentStatus() };
+    }
+    case "jobAgentRun": {
+      // Fire-and-forget: kick off the run but don't await the full ~4 minutes.
+      // The popup polls jobAgentStatus to render progress.
+      void runJobAgent({ locationHint: msg.locationHint }).catch((e) => {
+        log.error("runJobAgent threw", (e as Error).message);
+      });
+      // Give the runner a tick to flip phase off "idle" so the popup sees it
+      // immediately after the awaited response.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { t: "jobAgentStatus", status: getJobAgentStatus() };
+    }
+    case "jobAgentListLeads": {
+      const leads = await listJobLeads(msg.limit);
+      return { t: "jobAgentLeads", leads };
+    }
+    case "jobAgentListPicks": {
+      const picks = await listAgentPicks(msg.limit);
+      return { t: "jobAgentPicks", picks };
     }
     case "ping":
       return { t: "pong", at: Date.now() };
