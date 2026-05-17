@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { send } from "../../lib/messages";
+import {
+  defaultHybridAction,
+  HYBRID_ACTION_TYPES,
+  HYBRID_CONNECTORS,
+} from "../../lib/notion/action-plan";
+import { getNotionNativeConnectorMatches } from "../../lib/notion/connectors";
 import type {
   CompletionCandidate,
   FormContext,
+  HybridActionOverride,
+  HybridActionType,
   NotionPropertySpec,
   NotionRowCell,
   PageContext,
@@ -45,12 +53,18 @@ export function CompletionsView({ hasKey, onNeedKey, onOpenNotion }: Props) {
     refresh();
   }
   async function onApply(id: string) {
-    await send({ t: "executeConnectorFlow", connectorId: "notion", candidateId: id });
+    await send({ t: "applyCandidate", id });
     refresh();
   }
   async function onDeny(id: string) {
     await send({ t: "denyCandidate", id });
     refresh();
+  }
+  async function onSetHybridAction(id: string, action: HybridActionOverride) {
+    const resp = await send({ t: "setHybridAction", id, action });
+    if (resp.t === "completion" && resp.completion) {
+      setItems((prev) => prev.map((item) => item.id === id ? resp.completion as CompletionCandidate : item));
+    }
   }
   async function clearAll() {
     if (!confirm("Clear all completion candidates?")) return;
@@ -108,6 +122,7 @@ export function CompletionsView({ hasKey, onNeedKey, onOpenNotion }: Props) {
             onDelete={() => onDelete(c.id)}
             onApply={() => onApply(c.id)}
             onDeny={() => onDeny(c.id)}
+            onSetHybridAction={(action) => onSetHybridAction(c.id, action)}
             onOpenNotion={onOpenNotion}
           />
         ))}
@@ -124,12 +139,24 @@ interface RowProps {
   onDelete: () => void;
   onApply: () => void;
   onDeny: () => void;
+  onSetHybridAction: (action: HybridActionOverride) => void;
   onOpenNotion: () => void;
 }
 
-function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDeny, onOpenNotion }: RowProps) {
+function CompletionRow({
+  c,
+  expanded,
+  onToggle,
+  onRetry,
+  onDelete,
+  onApply,
+  onDeny,
+  onSetHybridAction,
+  onOpenNotion,
+}: RowProps) {
   const time = new Date(c.detectedAt).toLocaleTimeString(undefined, { hour12: false });
   const j = c.judgement;
+  const nativeConnectors = getNotionNativeConnectorMatches(c);
   return (
     <li className="text-xs">
       <button
@@ -163,6 +190,23 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDe
           {c.trigger.pageContext && <PageContextBlock ctx={c.trigger.pageContext} />}
           {c.trigger.formContext && <FormContextBlock fc={c.trigger.formContext} />}
 
+          {nativeConnectors.length > 0 && (
+            <Section label="Notion native connectors">
+              <div className="flex flex-wrap gap-1.5">
+                {nativeConnectors.map((connector) => (
+                  <span
+                    key={connector.id}
+                    className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 text-[10px]"
+                    title={connector.description}
+                  >
+                    {connector.label}
+                    <span className="ml-1 text-indigo-400">{connector.kind}</span>
+                  </span>
+                ))}
+              </div>
+            </Section>
+          )}
+
           {c.error && (
             <Section label="Error">
               <code className="text-[11px] text-rose-700">{c.error}</code>
@@ -177,6 +221,9 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDe
 
               {j.proposal && (
                 <>
+                  <Section label="Hybrid action">
+                    <HybridActionEditor c={c} onChange={onSetHybridAction} disabled={!!c.applied} />
+                  </Section>
                   <Section label={`Proposed DB — ${j.proposal.database.name} (${j.proposal.database.mode})`}>
                     {j.proposal.database.description && (
                       <p className="text-[11px] text-slate-600 mb-1">
@@ -213,7 +260,7 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDe
                   onClick={onApply}
                   className="px-2.5 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 text-[11px] font-medium"
                 >
-                  run Notion flow
+                  approve &amp; add to notion
                 </button>
                 <button
                   onClick={onDeny}
@@ -272,31 +319,68 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDe
               delete
             </button>
           </div>
-
-          {c.connectorRuns && c.connectorRuns.length > 0 && (
-            <Section label="Connector runs">
-              <ul className="text-[11px] text-slate-600 space-y-1">
-                {c.connectorRuns.slice(-4).reverse().map((run) => (
-                  <li key={`${run.connectorId}-${run.ranAt}`} className="flex items-center gap-2">
-                    <span
-                      className={
-                        "px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide " +
-                        (run.status === "applied"
-                          ? "bg-emerald-100 text-emerald-800"
-                          : "bg-rose-100 text-rose-800")
-                      }
-                    >
-                      {run.connectorLabel}
-                    </span>
-                    <span className="truncate">{run.message}</span>
-                  </li>
-                ))}
-              </ul>
-            </Section>
-          )}
         </div>
       )}
     </li>
+  );
+}
+
+function HybridActionEditor({
+  c,
+  onChange,
+  disabled,
+}: {
+  c: CompletionCandidate;
+  onChange: (action: HybridActionOverride) => void;
+  disabled: boolean;
+}) {
+  if (!c.judgement?.proposal) return <p className="text-[11px] text-slate-500">No action proposed.</p>;
+  const action = c.hybridAction ?? defaultHybridAction(c);
+
+  function patch(patchAction: Partial<HybridActionOverride>) {
+    onChange({ ...action, ...patchAction });
+  }
+
+  return (
+    <div className="space-y-1 text-[11px] text-slate-700">
+      <div className="grid grid-cols-2 gap-2">
+        <select
+          value={action.actionType}
+          onChange={(e) => patch({ actionType: e.target.value as HybridActionType })}
+          disabled={disabled}
+          className="px-2 py-1 rounded border border-slate-300 bg-white text-[11px]"
+        >
+          {HYBRID_ACTION_TYPES.map((type) => (
+            <option key={type} value={type}>{type}</option>
+          ))}
+        </select>
+        <select
+          value={action.connector}
+          onChange={(e) => patch({ connector: e.target.value })}
+          disabled={disabled}
+          className="px-2 py-1 rounded border border-slate-300 bg-white text-[11px]"
+        >
+          {HYBRID_CONNECTORS.map((connector) => (
+            <option key={connector} value={connector}>{connector}</option>
+          ))}
+        </select>
+      </div>
+      <input
+        value={action.target}
+        onChange={(e) => patch({ target: e.target.value })}
+        disabled={disabled}
+        placeholder="Target, e.g. #channel, email recipient, project"
+        className="w-full px-2 py-1 rounded border border-slate-300 bg-white text-[11px]"
+      />
+      <textarea
+        value={action.draft}
+        onChange={(e) => patch({ draft: e.target.value })}
+        disabled={disabled}
+        rows={3}
+        placeholder="Draft action content"
+        className="w-full px-2 py-1 rounded border border-slate-300 bg-white text-[11px] resize-none"
+      />
+    </div>
   );
 }
 

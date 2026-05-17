@@ -17,12 +17,6 @@ import { canonicalizeUrl } from "../lib/canonicalize";
 import { newId } from "../lib/ids";
 import { ingest, retryJudge } from "./ingest";
 import { applyCandidate, denyCandidate } from "./apply";
-import {
-  connectConnector,
-  disconnectConnector,
-  executeConnectorFlow,
-  listConnectors,
-} from "./connectors";
 import { getNotionGateway } from "../lib/notion/gateway";
 import { describeKeySource, hasOpenAiKey, redactKey, setOpenAiKey, getOpenAiKey } from "../lib/settings";
 import { pingOpenAi } from "../lib/openai";
@@ -95,7 +89,7 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
     }
     case "setCompletionStatus": {
       const c = msg.status === "promoted"
-        ? (await executeConnectorFlow("notion", msg.id)).completion
+        ? await applyCandidate(msg.id)
         : await denyCandidate(msg.id);
       return { t: "completion", completion: c };
     }
@@ -121,28 +115,19 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
       return { t: "ok" };
     }
     case "applyCandidate": {
-      const r = await executeConnectorFlow("notion", msg.id);
-      return { t: "completion", completion: r.completion };
+      const c = await applyCandidate(msg.id);
+      return { t: "completion", completion: c };
     }
     case "denyCandidate": {
       const c = await denyCandidate(msg.id);
       return { t: "completion", completion: c };
     }
-    case "listConnectors": {
-      const connectors = await listConnectors();
-      return { t: "connectors", connectors };
-    }
-    case "connectConnector": {
-      const connector = await connectConnector(msg.id);
-      return { t: "connectors", connectors: [connector] };
-    }
-    case "disconnectConnector": {
-      const connector = await disconnectConnector(msg.id);
-      return { t: "connectors", connectors: [connector] };
-    }
-    case "executeConnectorFlow": {
-      const r = await executeConnectorFlow(msg.connectorId, msg.candidateId);
-      return { t: "connectorFlowResult", connector: r.connector, completion: r.completion };
+    case "setHybridAction": {
+      const c = await completions.get(msg.id);
+      if (!c) return { t: "completion", completion: null };
+      c.hybridAction = msg.action;
+      await completions.update(c);
+      return { t: "completion", completion: c };
     }
     case "notionListDatabases": {
       const dbs = await notion.listDatabases();

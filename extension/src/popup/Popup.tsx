@@ -2,11 +2,10 @@ import { useEffect, useState } from "react";
 import { send } from "../lib/messages";
 import { RecentView } from "./views/RecentView";
 import { CompletionsView } from "./views/CompletionsView";
-import { ConnectorsView } from "./views/ConnectorsView";
 import { NotionView } from "./views/NotionView";
 import { SettingsView } from "./views/SettingsView";
 
-type Tab = "recent" | "completions" | "connectors" | "notion" | "settings";
+type Tab = "recent" | "completions" | "notion" | "settings";
 
 export function Popup() {
   const [tab, setTab] = useState<Tab>("recent");
@@ -29,7 +28,7 @@ export function Popup() {
           <span className="text-[10px] text-slate-400 uppercase tracking-wider">M0 · detect</span>
         </div>
         <nav className="mt-2 flex gap-1 text-xs">
-          {(["recent", "completions", "connectors", "notion", "settings"] as Tab[]).map((t) => (
+          {(["recent", "completions", "notion", "settings"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -66,9 +65,6 @@ export function Popup() {
             onNeedKey={() => setTab("settings")}
             onOpenNotion={() => setTab("notion")}
           />
-        )}
-        {tab === "connectors" && (
-          <ConnectorsView onOpenCompletions={() => setTab("completions")} />
         )}
         {tab === "notion" && <NotionView />}
         {tab === "settings" && <SettingsView onChanged={refreshKey} />}

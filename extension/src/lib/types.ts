@@ -175,15 +175,17 @@ export interface Judgement {
   proposal: NotionProposal | null;  // present iff meaningful
 }
 
-export interface ConnectorRun {
-  connectorId: string;
-  connectorLabel: string;
-  action: string;
-  status: "applied" | "failed";
-  message: string;
-  url?: string;
-  ranAt: number;
-  auto?: boolean;
+export type HybridActionType =
+  | "Save to Notion"
+  | "Send Slack message"
+  | "Draft email"
+  | "Create task";
+
+export interface HybridActionOverride {
+  actionType: HybridActionType;
+  connector: string;
+  target: string;
+  draft: string;
 }
 
 /** A detected completion candidate, with optional LLM judgement attached. */
@@ -219,5 +221,5 @@ export interface CompletionCandidate {
     /** True when applied automatically (cluster previously approved by user). */
     auto?: boolean;
   };
-  connectorRuns?: ConnectorRun[];
+  hybridAction?: HybridActionOverride;
 }
