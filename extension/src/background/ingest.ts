@@ -29,13 +29,17 @@
 import { makeLog } from "../lib/log";
 import { newId } from "../lib/ids";
 import { getEventStore, getCompletionStore } from "../lib/store";
-import { detectTriggers, clickSignature, type Trigger } from "../lib/completion/detect";
-import { buildLookback } from "../lib/completion/lookback";
+import type { Trigger } from "../lib/completion/detect";
 import { hasOpenAiKey } from "../lib/settings";
-import { judgeCandidate, type KnownDatabase } from "../lib/openai";
+import { judgeCandidate, type KnownDatabase, type KnownWorkflow } from "../lib/openai";
 import { getNotionGateway } from "../lib/notion/gateway";
+import { getObservationsClient } from "../lib/notion/observations";
+import { bumpObservationStats, setObservationLastError } from "../lib/notion/stats";
+import { getNotionConnection, isFullyConnected, getAutoApplyEnabled } from "../lib/settings";
 import { applyCandidate } from "./apply";
+import { healSystemDatabases } from "./index";
 import type { AppEvent, CompletionCandidate } from "../lib/types";
+import { NotionGatewayError } from "../lib/notion/types";
 
 const log = makeLog("bg");
 const events = getEventStore();
@@ -43,91 +47,164 @@ const completions = getCompletionStore();
 const notion = getNotionGateway();
 
 // ---- tunables -------------------------------------------------------------
-const LOOKBACK_FETCH = 800;                          // events scanned for lookback + repetition history
-const COALESCE_WINDOW_MS = 10_000;                   // candidates within this window in same tab get replaced
-const REPETITION_THROTTLE_MS = 7 * 24 * 60 * 60_000; // 7 days per pageKey cluster
-const ACTION_CLICK_THROTTLE_MS = 5 * 60_000;         // 5 min per (host, verb)
-const ACTION_CLICK_CONTEXT_WINDOW_MS = 5 * 60_000;   // include action-clicks from last 5 min in context
-const ACTION_CLICK_MAX_CONTEXT = 40;                 // hard cap on context size for action-click
+const LOOKBACK_FETCH = 800;                          // events scanned for activity-window + extended history
 const AUTO_APPLY_MIN_CONFIDENCE = 0.55;              // skip silent apply when LLM is wishy-washy
-const RICH_PAGE_DEDUP_MS = 24 * 60 * 60_000;         // 24 h per-URL dedup for rich-page trigger
 
 export async function ingest(event: AppEvent): Promise<void> {
-  await events.append(event);
-
-  // Strict gate: without an OpenAI key, do nothing past persistence. We
-  // also skip the trigger walk to save work.
-  if (!(await hasOpenAiKey())) {
+  // Hard block: never observe Notion itself. Otherwise the agent watches
+  // the user browse their own databases and tries to file those visits
+  // into… the same databases. Skip persistence entirely so notion pages
+  // also stay out of extended history / observations.
+  if (isBlockedHost(event.pageKey)) {
     return;
   }
 
-  // Pull enough recent history to feed both lookback and repetition.
-  const history = await events.recent(LOOKBACK_FETCH);
+  await events.append(event);
 
-  // Build the throttle sets. Cheap scans of the latest few hundred candidates.
-  const [repThrottle, recentlyFiredAction, recentlyFiredRichUrls] = await Promise.all([
-    loadRepetitionThrottle(),
-    loadRecentActionClusters(),
-    loadRecentRichUrls(),
-  ]);
+  // Kill switch: without Notion + OpenAI both connected, do nothing past
+  // persistence. The user never spends OpenAI calls on data they have no
+  // way to inspect.
+  if (!(await isFullyConnected())) {
+    return;
+  }
 
-  const triggers = detectTriggers({
-    event,
-    history,
-    recentlyFiredRepetitionClusters: repThrottle.blockedClusters,
-    recentlyFiredRepetitionUrls: repThrottle.firedUrls,
-    recentlyFiredActionClusters: recentlyFiredAction,
-    recentlyFiredRichUrls,
-  });
-  if (triggers.length === 0) return;
-  log("triggers fired", triggers.map((t) => `${t.reason}(${t.note})`).join(", "));
+  // ---- Hackathon model: one rolling-window judge per significant event,
+  // ---- debounced. No clusters, no richness gates, no signature matching.
+  // ---- The LLM sees the last few minutes of activity + existing DBs +
+  // ---- existing workflows and decides everything.
 
-  // For each trigger, run the judge pipeline. Coalesce duplicates as we go.
-  for (const trig of triggers) {
-    try {
-      await runTrigger(event, trig, history);
-    } catch (e) {
-      log.error("runTrigger failed", trig.reason, e);
-    }
+  // Pre-filter: only events with actionable content get judged. Skip
+  // bare nav-early notifications (no pageContext yet) and clicks with no
+  // fingerprint (those carry no signal).
+  if (!isSignificantEvent(event)) return;
+
+  // Per-tab debounce — collapse rapid bursts (nav-early + nav-settled +
+  // click + dwell-flush) into a single LLM call. Tabs run independently.
+  if (shouldDebounceJudge(event)) {
+    log("activity-judge debounced", event.tabId, event.kind);
+    return;
+  }
+  markJudgeFired(event);
+
+  try {
+    await runActivityJudge(event);
+  } catch (e) {
+    log.error("runActivityJudge failed", (e as Error).message);
   }
 }
 
-/** One full pipeline run for a single trigger. */
-async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): Promise<void> {
-  // Context window varies by trigger type — see helpers below.
-  let context: AppEvent[];
-  if (trig.reason === "repetition" && trig.clusterKey) {
-    context = buildRepetitionContext(event, history, trig.clusterKey);
-  } else if (trig.reason === "action-click" && trig.clusterKey) {
-    context = buildActionClickContext(event, history, trig.clusterKey);
-  } else {
-    context = buildLookback(history, event);
+/**
+ * Significant = "carries content worth sending to the LLM".
+ *  - nav with pageContext (the settled snapshot, not the early ping)
+ *  - page-dwell (always has pageContext)
+ *  - click with fingerprint (the user did something targeted)
+ *  - submit (always rich)
+ * Everything else returns false.
+ */
+function isSignificantEvent(e: AppEvent): boolean {
+  if (e.kind === "page-dwell") return true;
+  if (e.kind === "submit") return true;
+  if (e.kind === "click") return !!e.fingerprint;
+  if (e.kind === "nav") return !!e.pageContext;
+  return false;
+}
+
+/**
+ * Notion's own domains. Browsing the user's databases must not feed back
+ * into the judge — the agent would otherwise propose filing Notion pages
+ * into Notion. pageKey already lowercases the host and strips `www.`.
+ */
+function isBlockedHost(pageKey: string): boolean {
+  const host = pageKey.split("/")[0] ?? "";
+  if (!host) return false;
+  return (
+    host === "notion.so" ||
+    host.endsWith(".notion.so") ||
+    host === "notion.site" ||
+    host.endsWith(".notion.site")
+  );
+}
+
+/** In-memory per-tab last-fire timestamps. Service-worker scoped. */
+const lastJudgeByTab = new Map<number, number>();
+const JUDGE_DEBOUNCE_MS = 2500;
+
+function shouldDebounceJudge(event: AppEvent): boolean {
+  const last = lastJudgeByTab.get(event.tabId);
+  if (last == null) return false;
+  return event.ts - last < JUDGE_DEBOUNCE_MS;
+}
+
+function markJudgeFired(event: AppEvent): void {
+  lastJudgeByTab.set(event.tabId, event.ts);
+}
+
+// Rolling-window context: include events from the last N minutes.
+const ACTIVITY_WINDOW_MS = 3 * 60_000;        // last 3 min of full events
+const ACTIVITY_MAX_EVENTS = 30;               // hard cap on detail events
+const EXT_HISTORY_LOOKBACK_MS = 7 * 24 * 60 * 60_000; // 7 days
+const EXT_HISTORY_MAX = 60;                   // one-line summaries
+
+/**
+ * Run a single rolling-window judge call for a significant event.
+ *
+ *  1. Gather the last N minutes of significant events as full context.
+ *  2. Build an extended-history summary from older nav-with-pageContext
+ *     events so the LLM can spot patterns without us clustering.
+ *  3. Load existing DBs (with sample rows) + workflows.
+ *  4. Build a synthetic CompletionCandidate (reason="activity") and call
+ *     the judge.
+ *  5. If meaningful → notify and/or auto-apply, same as the legacy path.
+ */
+async function runActivityJudge(event: AppEvent): Promise<void> {
+  const history = await events.recent(LOOKBACK_FETCH);
+  const winCutoff = event.ts - ACTIVITY_WINDOW_MS;
+
+  // RECENT ACTIVITY = the last N min of significant events, oldest→newest,
+  // capped. The trigger event is always included even if cap would drop it.
+  const windowEvents: AppEvent[] = [];
+  for (const e of history) {
+    if (e.ts < winCutoff) break;
+    if (!isSignificantEvent(e)) continue;
+    windowEvents.push(e);
+  }
+  // history is newest→oldest; flip and cap (keeping the newest items).
+  windowEvents.reverse();
+  if (!windowEvents.some((e) => e.id === event.id)) windowEvents.push(event);
+  const context = windowEvents.slice(-ACTIVITY_MAX_EVENTS);
+
+  // EXTENDED HISTORY = older nav-with-pageContext events as one-liners,
+  // for pattern detection (e.g. "user has viewed 2 other job postings").
+  const extCutoff = event.ts - EXT_HISTORY_LOOKBACK_MS;
+  const seenPageKeys = new Set<string>();
+  const extendedHistory: CompletionCandidate["extendedHistory"] = [];
+  for (const e of history) {
+    if (e.ts < extCutoff) break;
+    if (e.ts >= winCutoff) continue; // already covered by RECENT ACTIVITY
+    if (e.kind !== "nav") continue;
+    if (!e.pageContext) continue;
+    if (seenPageKeys.has(e.pageKey)) continue;
+    seenPageKeys.add(e.pageKey);
+    extendedHistory.push({
+      ts: e.ts,
+      pageKey: e.pageKey,
+      host: e.pageKey.split("/")[0] || undefined,
+      title: e.pageContext.title || undefined,
+    });
+    if (extendedHistory.length >= EXT_HISTORY_MAX) break;
   }
 
   const pageKeys = uniq(context.map((e) => e.pageKey));
   const hosts = uniq(pageKeys.map((pk) => pk.split("/")[0]).filter(Boolean));
 
-  // Coalesce check — only for single-shot completion-y triggers (the second
-  // one of a form-submit→terminal-nav pair). Pattern triggers (repetition,
-  // action-click) are throttled separately and never coalesce.
-  if (trig.reason !== "repetition" && trig.reason !== "action-click") {
-    const replaced = await coalesceWithRecent(event, trig, context);
-    if (replaced === "skip") {
-      log("coalesce: skip", trig.reason);
-      return;
-    }
-    if (replaced === "replace") {
-      log("coalesce: replaced older candidate");
-    }
-  }
-
   const candidate: CompletionCandidate = {
     id: newId(),
     detectedAt: Date.now(),
-    reason: trig.reason,
-    triggerNote: trig.note,
+    reason: "activity",
+    triggerNote: `${event.kind} on ${event.pageKey}`,
     trigger: event,
     context,
+    extendedHistory,
     scope: {
       tabId: event.tabId,
       sinceTs: context[0]?.ts ?? event.ts,
@@ -141,39 +218,44 @@ async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): 
   };
 
   await completions.append(candidate);
-  log("candidate stored", candidate.id, trig.reason, "ctx=" + context.length);
+  log(
+    "activity candidate stored",
+    candidate.id,
+    "ctx=" + context.length,
+    "extHist=" + extendedHistory.length,
+  );
 
-  // Judge (best-effort; errors are stored on the candidate).
+  // Observations row — best-effort, fire-and-forget.
+  void writeObservation(event, {
+    reason: "rich-page",
+    note: candidate.triggerNote ?? "",
+  } as Trigger).catch((e) =>
+    log.warn("observation write failed", (e as Error).message),
+  );
+
   try {
-    const knownDbs = await loadKnownDatabases();
-    const judgement = await judgeCandidate(candidate, knownDbs);
+    const ctx = await loadJudgeContext();
+    const judgement = await judgeCandidate(candidate, ctx.databases, ctx.workflows);
     candidate.judgement = judgement;
     candidate.error = null;
     await completions.update(candidate);
-    log("candidate judged", candidate.id, {
+    log("activity candidate judged", candidate.id, {
       meaningful: judgement.meaningful,
       confidence: judgement.confidence,
       proposalDb: judgement.proposal?.database.name,
       mode: judgement.proposal?.database.mode,
     });
-    // Auto-apply path: the user has previously approved a candidate
-    // landing in some database X. If the judge now picks `use-existing`
-    // pointing at that same X, treat the user's prior approval as a
-    // standing trust signal for X and apply silently. The LLM does the
-    // semantic matching; the user's prior approval validates the
-    // destination.
-    //
-    // We do NOT require trigger reason or pageKey match — recipes,
-    // articles, jobs, etc. all have unique slugs so pageKey-equality is
-    // too tight. The DB-equality gate plus the LLM's confidence is the
-    // right level of strictness.
+
+    // Auto-apply: same rule as before — existing DB previously approved
+    // by user + LLM confidence ≥ threshold + autoApply toggle ON.
     let autoApplied = false;
     if (
       judgement.meaningful &&
       judgement.proposal &&
       judgement.proposal.database.mode === "use-existing" &&
       judgement.proposal.database.existingId &&
-      judgement.confidence >= AUTO_APPLY_MIN_CONFIDENCE
+      judgement.confidence >= AUTO_APPLY_MIN_CONFIDENCE &&
+      (await getAutoApplyEnabled())
     ) {
       const dbId = judgement.proposal.database.existingId;
       if (await isApprovedDatabase(dbId)) {
@@ -187,14 +269,166 @@ async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): 
       notifyCompletionPrompt(candidate).catch((err) => {
         log.warn("completion prompt notify failed", candidate.id, err);
       });
+      notifyPendingCandidate(candidate).catch((err) => {
+        log.warn("desktop notification failed", candidate.id, err);
+      });
     }
   } catch (e) {
     const msg = (e as Error).message;
-    log.error("judge failed", candidate.id, msg);
+    log.error("activity judge failed", candidate.id, msg);
     candidate.error = msg;
     await completions.update(candidate);
   }
 }
+
+// ---- Observations write (Phase 1) -----------------------------------------
+
+async function writeObservation(event: AppEvent, trig: Trigger): Promise<void> {
+  const client = await getObservationsClient();
+  if (!client) return;
+  const conn = await getNotionConnection();
+  if (!conn.bootstrapped) return;
+
+  const host = event.pageKey.split("/")[0] ?? "";
+  const title = (event.pageContext?.title ?? "").trim();
+  const verb = trig.reason;
+  const name = title ? `${verb} · ${title}` : `${verb} · ${host}`;
+
+  // Try to identify the page type from JSON-LD or OG metadata for a
+  // human-legible select. Best-effort.
+  const pageType = derivePageType(event);
+
+  const extracted: Record<string, unknown> = {
+    title,
+    canonicalUrl: event.pageContext?.canonicalUrl,
+    headings: (event.pageContext?.headings ?? []).slice(0, 5),
+  };
+
+  const dwellMeta = event.kind === "page-dwell" ? (event.meta as unknown) : undefined;
+  const engagement = isDwellMeta(dwellMeta)
+    ? {
+        foregroundMs: dwellMeta.foregroundMs,
+        scrollPct: dwellMeta.maxScrollPct,
+        interactions: dwellMeta.interactionCount,
+      }
+    : undefined;
+
+  // Local heuristic confidence (PRD §3.1). Derived from richness tier when
+  // available; otherwise from trigger kind (form-submit / terminal-nav are
+  // strong single-shot signals). The judge will produce its own confidence
+  // downstream — this is just a coarse "how sure was the detector".
+  const confidence = computeLocalConfidence(trig);
+
+  try {
+    const rec = await client.createObservation({
+      name: name.slice(0, 180),
+      capturedAt: event.ts,
+      url: event.url,
+      clusterKey: event.pageKey,
+      host,
+      triggerKind: trig.reason,
+      pageType,
+      extracted,
+      engagement,
+      confidence,
+      localEventId: event.id,
+    });
+    if (rec) {
+      await bumpObservationStats();
+      await setObservationLastError("");
+      log("observation logged", rec.id);
+    }
+  } catch (e) {
+    // If the Observations DB was deleted in Notion, recreate it once and
+    // retry. bootstrapAll() is idempotent + uses /search which excludes
+    // trashed objects, so it's safe to call here.
+    if (e instanceof NotionGatewayError && e.code === "not_found") {
+      const healed = await healSystemDatabases();
+      if (healed) {
+        const fresh = await getObservationsClient();
+        if (fresh) {
+          try {
+            const rec = await fresh.createObservation({
+              name: name.slice(0, 180),
+              capturedAt: event.ts,
+              url: event.url,
+              clusterKey: event.pageKey,
+              host,
+              triggerKind: trig.reason,
+              pageType,
+              extracted,
+              engagement,
+              confidence,
+              localEventId: event.id,
+            });
+            if (rec) {
+              await bumpObservationStats();
+              await setObservationLastError("");
+              log("observation logged (post-heal)", rec.id);
+              return;
+            }
+          } catch (e2) {
+            const m2 = (e2 as Error).message;
+            await setObservationLastError(m2);
+            throw e2;
+          }
+        }
+      }
+    }
+    const m = (e as Error).message;
+    await setObservationLastError(m);
+    throw e;
+  }
+}
+
+function derivePageType(event: AppEvent): string | undefined {
+  const pc = event.pageContext;
+  if (!pc) return undefined;
+  // JSON-LD @type wins when present.
+  for (const block of pc.jsonLd ?? []) {
+    const t = (block as { "@type"?: unknown })["@type"];
+    if (typeof t === "string") return t;
+    if (Array.isArray(t)) {
+      const s = t.find((x) => typeof x === "string");
+      if (s) return s as string;
+    }
+  }
+  const og = pc.og?.["type"];
+  if (typeof og === "string" && og) return og;
+  return undefined;
+}
+
+/** Coarse local-heuristic 0..1 score for the Observations.Confidence column.
+ *  Strong single-shot signals beat pattern signals; richness tier refines. */
+function computeLocalConfidence(trig: Trigger): number {
+  // Pattern triggers — depend almost entirely on judge to filter.
+  if (trig.reason === "repetition" || trig.reason === "action-click") return 0.4;
+  // Single-shot strong intent signals.
+  if (trig.reason === "form-submit" || trig.reason === "terminal-nav") return 0.85;
+  // Content / rich-page — let richness drive.
+  const tier = trig.richness?.tier;
+  if (tier === "high-value") return 0.9;
+  if (tier === "content") return 0.6;
+  return 0.5;
+}
+
+function isDwellMeta(v: unknown): v is {
+  foregroundMs: number;
+  maxScrollPct: number;
+  interactionCount: number;
+} {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.foregroundMs === "number" &&
+    typeof o.maxScrollPct === "number" &&
+    typeof o.interactionCount === "number"
+  );
+}
+
+/** One full pipeline run for a single trigger. */
+// Removed in hackathon refactor: runTrigger() and friends. The single
+// `runActivityJudge` path above replaces them.
 
 async function notifyCompletionPrompt(candidate: CompletionCandidate): Promise<void> {
   const tabId = candidate.trigger.tabId;
@@ -209,189 +443,49 @@ async function notifyCompletionPrompt(candidate: CompletionCandidate): Promise<v
 }
 
 /**
+ * Surface a meaningful candidate to the OS notification center so the user
+ * knows there's something pending review even when the page that triggered
+ * it is no longer in the foreground. Clicking the notification opens the
+ * popup on the Completions tab.
+ */
+async function notifyPendingCandidate(candidate: CompletionCandidate): Promise<void> {
+  if (!chrome.notifications?.create) return;
+  const prop = candidate.judgement?.proposal;
+  const dbName = prop?.database.name ?? "candidate";
+  const mode = prop?.database.mode === "use-existing" ? "log to" : "create";
+  await chrome.notifications.create(`pending:${candidate.id}`, {
+    type: "basic",
+    iconUrl: chrome.runtime.getURL("public/icon-128.png"),
+    title: "Notion Hack — review pending",
+    message: `Proposed: ${mode} "${dbName}". Click to review and apply.`,
+    priority: 0,
+  });
+}
+
+/**
  * For repetition triggers, the context is the union of:
  *   (a) the current event's same-tab lookback (recent activity around it), and
  *   (b) all past `page-dwell` / `nav` events sharing the same cluster (pageKey)
  *       — these are what makes the pattern visible to the LLM.
  * Result is sorted by time and deduped by id.
  */
-function buildRepetitionContext(
-  event: AppEvent,
-  history: AppEvent[],
-  clusterKey: string,
-): AppEvent[] {
-  const sameTab = buildLookback(history, event);
-  const clusterMembers: AppEvent[] = [];
-  const cutoffTs = event.ts - 30 * 24 * 60 * 60_000;
-  for (const e of history) {
-    if (e.ts < cutoffTs) break;
-    if (e.id === event.id) continue;
-    if (e.kind !== "page-dwell" && e.kind !== "nav") continue;
-    if (e.pageKey !== clusterKey) continue;
-    clusterMembers.push(e);
-  }
-  const byId = new Map<string, AppEvent>();
-  for (const e of [...sameTab, ...clusterMembers, event]) byId.set(e.id, e);
-  return Array.from(byId.values()).sort((a, b) => a.ts - b.ts);
-}
-
-/**
- * For action-click triggers, the context is:
- *   (a) every click in the action-click window on the same host that matched
- *       the same verb — these ARE the pattern, and the LLM needs to see them all
- *       (often each click's fingerprint carries the local content the user
- *       acted on, e.g. tweet text near a Bookmark button).
- *   (b) every page-dwell / nav event in the window on the same host — gives
- *       the LLM page-level context (titles, JSON-LD, og:* on the surrounding
- *       pages).
- *   (c) the trigger event itself.
- * Deduped, sorted, capped.
- */
-function buildActionClickContext(
-  event: AppEvent,
-  history: AppEvent[],
-  clusterKey: string,
-): AppEvent[] {
-  // clusterKey shape: `${host}::${signature}` (signature itself contains a
-  // single colon, e.g. "label:save recipe" or "testid:bookmark-btn").
-  const sepIdx = clusterKey.indexOf("::");
-  if (sepIdx === -1) return [event];
-  const host = clusterKey.slice(0, sepIdx);
-  const sig = clusterKey.slice(sepIdx + 2);
-  if (!host || !sig) return [event];
-
-  const cutoffTs = event.ts - ACTION_CLICK_CONTEXT_WINDOW_MS;
-  const picked: AppEvent[] = [];
-  for (const e of history) {
-    if (e.ts < cutoffTs) break;
-    if (e.id === event.id) continue;
-    const h = e.pageKey.split("/")[0];
-    if (h !== host) continue;
-    if (e.kind === "click") {
-      if (clickSignature(e.fingerprint) !== sig) continue;
-      picked.push(e);
-    } else if (e.kind === "page-dwell" || e.kind === "nav") {
-      picked.push(e);
-    }
-  }
-  picked.push(event);
-
-  const byId = new Map<string, AppEvent>();
-  for (const e of picked) byId.set(e.id, e);
-  const merged = Array.from(byId.values()).sort((a, b) => a.ts - b.ts);
-  if (merged.length <= ACTION_CLICK_MAX_CONTEXT) return merged;
-  // Keep oldest dwell/nav anchors + all the action clicks + the trigger.
-  // Simple strategy: keep the LAST N (most recent) up to cap.
-  return merged.slice(-ACTION_CLICK_MAX_CONTEXT);
-}
-
-/**
- * Look for a recently-created candidate in the same tab whose trigger event
- * is within COALESCE_WINDOW_MS of the new trigger. If found:
- *   - delete it (the new one will replace it)
- *   - return "replace"
- * If no recent candidate, return "ok".
- */
-async function coalesceWithRecent(
-  event: AppEvent,
-  _trig: Trigger,
-  _context: AppEvent[],
-): Promise<"ok" | "replace" | "skip"> {
-  const recent = await completions.recent(20);
-  for (const c of recent) {
-    if (c.trigger.tabId !== event.tabId) continue;
-    // Don't coalesce pattern-style candidates — only single-shot ones.
-    if (c.reason === "repetition" || c.reason === "action-click") continue;
-    const dt = event.ts - c.trigger.ts;
-    if (dt < 0 || dt > COALESCE_WINDOW_MS) continue;
-    await completions.delete(c.id);
-    return "replace";
-  }
-  return "ok";
-}
-
-/**
- * Compute the per-cluster throttle state for the repetition trigger.
- *
- *   blockedClusters: clusters where firing another candidate right now would
- *     be noise — they have a recent pending OR denied candidate. Approved
- *     clusters are deliberately NOT blocked: once the user has decided
- *     "yes, track these", new items in the cluster should surface so they
- *     can add them to the same DB.
- *
- *   firedUrls: every URL we've already shown the user a candidate for in
- *     the lookback window. Stops SPA revisits to the same page from
- *     creating duplicate candidates even in approved clusters.
- */
-async function loadRepetitionThrottle(): Promise<{
-  blockedClusters: Set<string>;
-  firedUrls: Set<string>;
-}> {
-  const recent = await completions.recent(500);
-  const cutoffTs = Date.now() - REPETITION_THROTTLE_MS;
-  const blockedClusters = new Set<string>();
-  const firedUrls = new Set<string>();
-  for (const c of recent) {
-    if (c.reason !== "repetition") continue;
-    if (c.detectedAt < cutoffTs) continue;
-    // Dedup by exact URL regardless of decision state.
-    firedUrls.add(c.trigger.url);
-    // Cluster is blocked unless the user explicitly approved a row from it.
-    const approved = c.applied?.status === "applied";
-    if (!approved) blockedClusters.add(c.trigger.pageKey);
-  }
-  return { blockedClusters, firedUrls };
-}
-
-/**
- * Same idea for action-click — derive `${host}::${signature}` from each
- * recent action-click candidate's trigger event.
- */
-async function loadRecentActionClusters(): Promise<Set<string>> {
-  const recent = await completions.recent(200);
-  const out = new Set<string>();
-  const cutoffTs = Date.now() - ACTION_CLICK_THROTTLE_MS;
-  for (const c of recent) {
-    if (c.reason !== "action-click") continue;
-    if (c.detectedAt < cutoffTs) continue;
-    const host = c.trigger.pageKey.split("/")[0];
-    if (!host) continue;
-    const sig = clickSignature(c.trigger.fingerprint);
-    if (!sig) continue;
-    out.add(`${host}::${sig}`);
-  }
-  return out;
-}
-
-/**
- * URLs we've already created a `rich-page` candidate for within the
- * dedup window. Prevents the judge from being called on every revisit to
- * the same article/recipe/product.
- */
-async function loadRecentRichUrls(): Promise<Set<string>> {
-  const recent = await completions.recent(500);
-  const out = new Set<string>();
-  const cutoffTs = Date.now() - RICH_PAGE_DEDUP_MS;
-  for (const c of recent) {
-    if (c.reason !== "rich-page") continue;
-    if (c.detectedAt < cutoffTs) continue;
-    out.add(c.trigger.url);
-  }
-  return out;
-}
+// Removed in hackathon refactor: buildRepetitionContext, buildActionClickContext,
+// coalesceWithRecent, loadRepetitionThrottle, loadRecentActionClusters,
+// loadRecentRichUrls, loadRecentDwellUrls. The activity-judge path uses a
+// flat time-windowed context and lets the LLM filter meaningfulness.
 
 /** Re-run the judge for an existing candidate (popup "Retry"). */
 export async function retryJudge(id: string): Promise<CompletionCandidate | null> {
   const c = await completions.get(id);
   if (!c) return null;
-  if (!(await hasOpenAiKey())) {
-    c.error = "no-openai-key";
+  if (!(await isFullyConnected())) {
+    c.error = (await hasOpenAiKey()) ? "notion-not-connected" : "no-openai-key";
     await completions.update(c);
     return c;
   }
   try {
-    const knownDbs = await loadKnownDatabases();
-    const judgement = await judgeCandidate(c, knownDbs);
+    const ctx = await loadJudgeContext();
+    const judgement = await judgeCandidate(c, ctx.databases, ctx.workflows);
     c.judgement = judgement;
     c.error = null;
   } catch (e) {
@@ -402,14 +496,119 @@ export async function retryJudge(id: string): Promise<CompletionCandidate | null
 }
 
 /**
- * Snapshot of currently-known Notion databases for the judge prompt.
- * Lets the LLM choose `use-existing` and reuse a DB the user has already
- * approved, instead of proposing a near-duplicate every time a new item
- * in an approved cluster fires a candidate.
+ * Snapshot of REAL workspace state the judge needs to decide whether to
+ * reuse an existing destination DB and/or workflow vs. propose a new one.
+ *
+ *  - databases: all child DBs of the user's parent page (excludes the 3
+ *    system DBs). The judge prefers `use-existing` against any of these.
+ *  - workflows: all rows from the user's Workflows DB. The judge treats
+ *    a matching workflow as a STANDING APPROVAL to reuse its target DB.
+ *
+ * Cached for 30s so a burst of triggers in the same tab doesn't re-fetch.
  */
-async function loadKnownDatabases(): Promise<KnownDatabase[]> {
-  const dbs = await notion.listDatabases();
-  return dbs.map((d) => ({ id: d.id, name: d.name, properties: d.properties }));
+interface JudgeContext {
+  databases: KnownDatabase[];
+  workflows: KnownWorkflow[];
+}
+const CTX_TTL_MS = 30_000;
+let ctxCache: { at: number; value: JudgeContext } | null = null;
+
+async function loadJudgeContext(): Promise<JudgeContext> {
+  if (ctxCache && Date.now() - ctxCache.at < CTX_TTL_MS) {
+    return ctxCache.value;
+  }
+  const client = await getObservationsClient();
+  const conn = await getNotionConnection();
+  if (!client || !conn.bootstrapped) {
+    // Fall back to the (mostly empty) mock gateway so dev mode without a
+    // real Notion connection still has SOMETHING to show the judge.
+    const fallback = await notion.listDatabases();
+    const value: JudgeContext = {
+      databases: fallback.map((d) => ({
+        id: d.id,
+        name: d.name,
+        description: "",
+        properties: d.properties,
+      })),
+      workflows: [],
+    };
+    ctxCache = { at: Date.now(), value };
+    return value;
+  }
+  // Parallel: child DBs under the parent + recent workflows from Workflows DB.
+  const [databases, workflowsRaw] = await Promise.all([
+    client.listChildDatabases(conn.parentPageId, 50).catch((e) => {
+      log.warn("loadJudgeContext: listChildDatabases failed", (e as Error).message);
+      return [] as Awaited<ReturnType<typeof client.listChildDatabases>>;
+    }),
+    client.listWorkflows(50).catch((e) => {
+      log.warn("loadJudgeContext: listWorkflows failed", (e as Error).message);
+      return [] as Awaited<ReturnType<typeof client.listWorkflows>>;
+    }),
+  ]);
+  const workflows: KnownWorkflow[] = workflowsRaw
+    .filter((w) => w.status !== "archived")
+    .map((w) => ({
+      id: w.id,
+      name: w.name,
+      status: w.status,
+      runMode: w.runMode,
+      targetDatabaseId: w.targetDatabaseId,
+      targetDatabaseName: w.targetDatabaseName,
+      sourceApps: w.sourceApps,
+      reasoning: w.reasoning,
+      runCount: w.runCount,
+    }));
+  const value: JudgeContext = {
+    databases: databases.map((d) => ({
+      id: d.id,
+      name: d.name,
+      description: d.description,
+      properties: d.properties,
+    })),
+    workflows,
+  };
+
+  // Best-effort: fetch a few recent rows per DB so the judge can pattern-
+  // match what already lives there. Parallel, capped concurrency via simple
+  // batching. Failures swallow to []; absent samples just reduces prompt
+  // signal, not a hard error.
+  const SAMPLE_LIMIT = 5;
+  const rowsByDb = await Promise.all(
+    value.databases.map((d) =>
+      client
+        .listRecentRows(d.id, SAMPLE_LIMIT)
+        .catch(() => [] as Awaited<ReturnType<typeof client.listRecentRows>>),
+    ),
+  );
+  for (let i = 0; i < value.databases.length; i++) {
+    const rows = rowsByDb[i] ?? [];
+    if (rows.length) {
+      value.databases[i].recentRows = rows.map((r) => ({ properties: r.properties }));
+    }
+  }
+
+  ctxCache = { at: Date.now(), value };
+  log(
+    "judge context loaded",
+    `dbs=${value.databases.length}·workflows=${value.workflows.length}·cache=${CTX_TTL_MS}ms`,
+  );
+  return value;
+}
+
+/** Force a re-fetch on next judge call. Call after applying a candidate
+ *  so a newly-created workflow + DB appears in subsequent judgements
+ *  without waiting for the TTL. */
+export function invalidateJudgeContext(): void {
+  ctxCache = null;
+}
+
+/** Reset in-memory ingest state — per-tab debounce + judge context cache.
+ *  Call after a destructive local-data wipe so the next event behaves like
+ *  a cold start. */
+export function resetIngestState(): void {
+  lastJudgeByTab.clear();
+  ctxCache = null;
 }
 
 /**

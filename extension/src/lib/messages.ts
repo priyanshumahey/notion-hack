@@ -3,7 +3,14 @@
 // wrapper buy us refactor safety without a heavyweight RPC framework.
 
 import type { AppEvent, CompletionCandidate } from "./types";
-import type { NotionDatabase, NotionPage } from "./notion/types";
+import type {
+  NotionDatabase,
+  NotionPage,
+  ParentPageHit,
+  RecentObservation,
+  RecentWorkflow,
+  RecentRun,
+} from "./notion/types";
 
 export type Msg =
   // content → bg
@@ -33,10 +40,24 @@ export type Msg =
   | { t: "notionGetDatabase"; id: string }
   | { t: "notionListPages"; databaseId: string; limit: number }
   | { t: "notionClearAll" }
+  // popup → bg : real-notion connection (Phase 1)
+  | { t: "notionGetConnection" }
+  | { t: "notionSetToken"; token: string }
+  | { t: "notionDisconnect" }
+  | { t: "notionSearchParents"; query: string }
+  | { t: "notionBootstrap"; parentPageId: string; parentPageTitle: string }
+  | { t: "notionTestConnection" }
+  | { t: "notionObservationStats" }
+  | { t: "notionListObservations"; limit: number }
+  | { t: "notionListWorkflows"; limit: number }
+  | { t: "notionListRuns"; limit: number }
   // popup → bg : settings / health
   | { t: "getKeyStatus" }
   | { t: "setOpenAiKey"; key: string }
   | { t: "testOpenAi" }
+  | { t: "getAutoApply" }
+  | { t: "setAutoApply"; enabled: boolean }
+  | { t: "clearLocalData" }
   | { t: "ping" };
 
 export type MsgResponse =
@@ -47,8 +68,32 @@ export type MsgResponse =
   | { t: "notionDatabases"; workspace: string; databases: NotionDatabase[] }
   | { t: "notionDatabase"; database: NotionDatabase | null }
   | { t: "notionPages"; pages: NotionPage[] }
+  | {
+      t: "notionConnection";
+      hasToken: boolean;
+      bootstrapped: boolean;
+      workspaceName: string;
+      parentPageId: string;
+      parentPageTitle: string;
+      observationsDbId: string;
+      workflowsDbId: string;
+      runsDbId: string;
+      redactedToken: string;
+    }
+  | { t: "notionParents"; results: ParentPageHit[] }
+  | {
+      t: "notionBootstrapped";
+      observationsDbId: string;
+      workflowsDbId: string;
+      runsDbId: string;
+    }
+  | { t: "notionObservationStats"; today: number; total: number; lastError?: string }
+  | { t: "notionObservations"; observations: RecentObservation[] }
+  | { t: "notionWorkflows"; workflows: RecentWorkflow[] }
+  | { t: "notionRuns"; runs: RecentRun[] }
   | { t: "keyStatus"; hasKey: boolean; source: "stored" | "build" | "none"; redacted: string }
-  | { t: "testResult"; ok: boolean; error?: string }
+  | { t: "testResult"; ok: boolean; error?: string; detail?: string }
+  | { t: "autoApply"; enabled: boolean }
   | { t: "pong"; at: number }
   | { t: "error"; message: string };
 

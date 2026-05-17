@@ -7,8 +7,12 @@
 // Keep the interface tight: every method here will need to be implemented
 // against real Notion. If you're tempted to add a mock-only convenience,
 // don't.
+//
+// NB: Phase-1 observation traffic to real Notion does NOT go through this
+// interface — see notion/observations.ts (ObservationsClient). The apply
+// pipeline still uses NotionGateway against the mock IDB workspace.
 
-import type { NotionPropertySpec } from "../types";
+import type { CompletionCandidate, NotionPropertySpec } from "../types";
 
 /** Stored database record. */
 export interface NotionDatabase {
@@ -80,6 +84,168 @@ export interface NotionGateway {
 
   // Admin
   clearAll(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Phase-1 real-Notion surface (observations only)
+//
+// ObservationsClient lives in notion/observations.ts. The factory returns null
+// when no token is configured. We keep this disjoint from NotionGateway so the
+// apply pipeline can keep targeting the mock IDB while real-Notion observation
+// writes happen in parallel.
+// ---------------------------------------------------------------------------
+
+export interface WhoAmI {
+  /** Friendly name to show in Settings. */
+  workspaceName: string;
+  /** Bot user id (for diagnostics). */
+  botUserId: string;
+}
+
+export interface ParentPageHit {
+  id: string;
+  title: string;
+  /** notion.so URL if available. */
+  url: string;
+  /** Last edited iso string. */
+  lastEditedAt?: string;
+}
+
+export interface ObservationInput {
+  /** Short label rendered as the page title. */
+  name: string;
+  capturedAt: number;
+  url: string;
+  clusterKey: string;
+  host: string;
+  triggerKind: CompletionCandidate["reason"];
+  pageType?: string;
+  /** Best local guess at extracted JSON. May be empty. */
+  extracted?: unknown;
+  engagement?: {
+    foregroundMs?: number;
+    scrollPct?: number;
+    interactions?: number;
+  };
+  /** 0..1 local heuristic. */
+  confidence?: number;
+  /** Cross-ref to the IDB AppEvent that triggered this observation. */
+  localEventId: string;
+}
+
+export interface ObservationRecord {
+  id: string;
+  url: string;
+}
+
+/** Read-side shape used by the popup "Observations" tab. Subset of the row
+ *  schema — we don't need engagement/extracted blobs at list time. */
+export interface RecentObservation {
+  id: string;
+  url: string;
+  name: string;
+  /** ms epoch parsed from the row's "Captured At" date prop. */
+  capturedAt: number;
+  host: string;
+  triggerKind: string;
+  pageType: string;
+  /** The original page URL from the row's URL prop (not the Notion page url). */
+  sourceUrl: string;
+  confidence: number | null;
+  status: string;
+}
+
+// ---------------------------------------------------------------------------
+// Workflows — write & read shapes
+// ---------------------------------------------------------------------------
+
+export interface WorkflowInput {
+  name: string;
+  status: "proposed" | "active" | "paused" | "archived";
+  /** JSON-serializable trigger spec — stored as rich_text. */
+  triggerSpec: unknown;
+  /** Hosts (multi_select). */
+  sourceApps: string[];
+  targetDatabaseId: string;
+  targetDatabaseName: string;
+  /** JSON-serializable per-property extraction spec — stored as rich_text. */
+  extractionSchema: unknown;
+  runMode: "ask-each-time" | "auto-after-N" | "auto";
+  confidenceFloor: number;
+  reasoning: string;
+  sourceCandidateId: string;
+  sourceLocalEventIds: string[];
+  approvedAt: number;
+}
+
+export interface WorkflowRecord {
+  id: string;
+  url: string;
+}
+
+export interface RecentWorkflow {
+  id: string;
+  url: string;
+  name: string;
+  status: string;
+  runMode: string;
+  targetDatabaseId: string;
+  targetDatabaseName: string;
+  sourceApps: string[];
+  reasoning: string;
+  approvedAt: number;
+  lastTriggered: number;
+  runCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Runs — write & read shapes
+// ---------------------------------------------------------------------------
+
+export interface RunInput {
+  workflowPageId: string;
+  workflowName: string;
+  triggeredAt: number;
+  pageUrl: string;
+  status: "proposed" | "confirmed" | "auto" | "dismissed" | "failed" | "skipped";
+  userResponse: "yes" | "no" | "no-ask-again" | "n/a";
+  createdPageId: string;
+  createdPageUrl: string;
+  /** JSON-serializable; stored as rich_text. */
+  extracted: unknown;
+  error: string;
+  latencyMs: number;
+}
+
+export interface RunRecord {
+  id: string;
+  url: string;
+}
+
+export interface RecentRun {
+  id: string;
+  url: string;
+  name: string;
+  status: string;
+  userResponse: string;
+  workflowName: string;
+  workflowPageId: string;
+  pageUrl: string;
+  createdPageUrl: string;
+  triggeredAt: number;
+  latencyMs: number | null;
+  error: string;
+}
+
+export interface ObservationsClient {
+  workspaceName(): string;
+  whoAmI(): Promise<WhoAmI>;
+  searchParentPages(query: string, limit: number): Promise<ParentPageHit[]>;
+  /** Idempotently ensure the Observations DB exists. */
+  bootstrapObservations(parentPageId: string): Promise<{ observationsDbId: string }>;
+  createObservation(input: ObservationInput): Promise<ObservationRecord | null>;
+  /** Most recent rows from the Observations DB, sorted by Captured At desc. */
+  listRecentObservations(limit: number): Promise<RecentObservation[]>;
 }
 
 export class NotionGatewayError extends Error {

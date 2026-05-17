@@ -179,11 +179,30 @@ export interface Judgement {
 export interface CompletionCandidate {
   id: string;
   detectedAt: number;
-  reason: "form-submit" | "terminal-nav" | "content-dwell" | "repetition" | "action-click" | "rich-page";
+  reason:
+    | "activity"           // hackathon: single rolling-window judge over recent activity
+    | "form-submit"
+    | "terminal-nav"
+    | "content-dwell"
+    | "repetition"
+    | "action-click"
+    | "rich-page";
   /** Free-form, human-readable explanation of why the trigger fired. */
   triggerNote?: string;
   trigger: AppEvent;
   context: AppEvent[];        // oldest → newest, ending at trigger (inclusive)
+  /**
+   * Compact one-line-per-page summary of older nav events outside the
+   * rolling context window. Used by the judge prompt to recognize
+   * patterns ("user has viewed N similar pages this week") WITHOUT
+   * needing a clustering pass at the detector level.
+   */
+  extendedHistory?: Array<{
+    ts: number;
+    pageKey: string;
+    host?: string;
+    title?: string;
+  }>;
   scope: {
     tabId: number;
     sinceTs: number;

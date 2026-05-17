@@ -1,7 +1,8 @@
 // Singleton accessor for the active NotionGateway.
 //
-// Today: always returns MockNotionGateway.
-// Later: read a preference and return Mock or Real (or hybrid).
+// Phase 1: this is still the MOCK gateway. Real-Notion code lives in
+// notion/observations.ts (ObservationsClient) and runs in parallel —
+// observations write to real Notion, completion-apply still writes to mock.
 
 import type { NotionGateway } from "./types";
 import { MockNotionGateway } from "./mock";

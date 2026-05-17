@@ -450,49 +450,187 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   const root = document.createElement("section");
   root.id = COMPLETION_PROMPT_ROOT_ID;
   root.setAttribute("aria-label", "Repeatable interaction prompt");
-
-  const title = document.createElement("div");
-  title.className = "nh-completion-title";
-  title.textContent = "Repeatable Interaction Identified.";
-
-  const body = document.createElement("div");
-  body.className = "nh-completion-body";
-  body.textContent = "Would you like to save it";
-
-  const meta = document.createElement("div");
-  meta.className = "nh-completion-meta";
-  meta.textContent = prompt.databaseName || labelForCompletionReason(prompt.reason);
-
-  const actions = document.createElement("div");
-  actions.className = "nh-completion-actions";
-
-  const yes = document.createElement("button");
-  yes.type = "button";
-  yes.className = "nh-completion-button is-primary";
-  yes.textContent = "Yes";
-  yes.addEventListener("click", (e) => {
-    e.stopPropagation();
-    void send({ t: "setCompletionStatus", id: prompt.id, status: "promoted" });
-    root.remove();
-  });
-
-  const no = document.createElement("button");
-  no.type = "button";
-  no.className = "nh-completion-button";
-  no.textContent = "No";
-  no.addEventListener("click", (e) => {
-    e.stopPropagation();
-    void send({ t: "setCompletionStatus", id: prompt.id, status: "dismissed" });
-    root.remove();
-  });
-
-  actions.append(yes, no);
-  root.append(title, body, meta, actions);
   document.documentElement.appendChild(root);
+
+  // The bubble is a tiny state machine. `prompt` step asks the user; on Yes
+  // we transition to `saving` while applyCandidate runs against real Notion,
+  // then to `saved` with a deep link to the created page, or `error` with a
+  // retry. The user can dismiss from any non-saving state.
+  let dismissTimer: number | null = null;
+  let inFlight = false;
+  type Step = "prompt" | "saving" | "saved" | "skipped" | "error";
+
+  function render(step: Step, ctx: { pageUrl?: string; error?: string } = {}) {
+    if (dismissTimer !== null) {
+      window.clearTimeout(dismissTimer);
+      dismissTimer = null;
+    }
+    root.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "nh-completion-title";
+    const body = document.createElement("div");
+    body.className = "nh-completion-body";
+    const meta = document.createElement("div");
+    meta.className = "nh-completion-meta";
+    meta.textContent = prompt.databaseName || labelForCompletionReason(prompt.reason);
+    const actions = document.createElement("div");
+    actions.className = "nh-completion-actions";
+
+    if (step === "prompt") {
+      title.textContent = "Repeatable Interaction Identified.";
+      body.textContent = "Would you like to save it";
+
+      const yes = makeButton("Yes", true);
+      yes.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void doApply();
+      });
+      const no = makeButton("No", false);
+      no.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void doDeny();
+      });
+      actions.append(yes, no);
+    } else if (step === "saving") {
+      title.textContent = "Saving to Notion…";
+      const spin = document.createElement("span");
+      spin.className = "nh-completion-spinner";
+      spin.setAttribute("aria-hidden", "true");
+      body.append(spin, document.createTextNode("Writing the page + workflow."));
+
+      const cancel = makeButton("Hide", false);
+      cancel.title = "Close this prompt — the save will still finish in the background.";
+      cancel.addEventListener("click", (e) => {
+        e.stopPropagation();
+        root.remove();
+      });
+      actions.append(cancel);
+    } else if (step === "saved") {
+      root.classList.add("is-saved");
+      title.textContent = "Saved to Notion ✓";
+      body.textContent = "You can re-open the row to edit, or undo from the popup.";
+
+      const view = document.createElement("a");
+      view.className = "nh-completion-button is-primary";
+      view.textContent = "View ↗";
+      view.target = "_blank";
+      view.rel = "noreferrer noopener";
+      view.href = ctx.pageUrl || "#";
+      if (!ctx.pageUrl) view.style.pointerEvents = "none";
+
+      const close = makeButton("Close", false);
+      close.addEventListener("click", (e) => {
+        e.stopPropagation();
+        root.remove();
+      });
+      actions.append(view, close);
+
+      // Auto-dismiss after a generous beat so the user can read + click.
+      dismissTimer = window.setTimeout(() => {
+        root.remove();
+      }, 8000);
+    } else if (step === "skipped") {
+      root.classList.add("is-saved");
+      title.textContent = "Already saved";
+      body.textContent =
+        "This page is already in your Notion workspace — opened the existing row instead of creating a duplicate.";
+
+      const view = document.createElement("a");
+      view.className = "nh-completion-button is-primary";
+      view.textContent = "View ↗";
+      view.target = "_blank";
+      view.rel = "noreferrer noopener";
+      view.href = ctx.pageUrl || "#";
+      if (!ctx.pageUrl) view.style.pointerEvents = "none";
+
+      const close = makeButton("Close", false);
+      close.addEventListener("click", (e) => {
+        e.stopPropagation();
+        root.remove();
+      });
+      actions.append(view, close);
+
+      dismissTimer = window.setTimeout(() => {
+        root.remove();
+      }, 6000);
+    } else {
+      // error
+      root.classList.add("is-error");
+      title.textContent = "Couldn't save to Notion";
+      body.textContent = ctx.error || "Unknown error.";
+
+      const retry = makeButton("Retry", true);
+      retry.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void doApply();
+      });
+      const close = makeButton("Dismiss", false);
+      close.addEventListener("click", (e) => {
+        e.stopPropagation();
+        root.remove();
+      });
+      actions.append(retry, close);
+    }
+
+    root.append(title, body, meta, actions);
+  }
+
+  async function doApply() {
+    if (inFlight) return;
+    inFlight = true;
+    render("saving");
+    try {
+      const resp = await send({ t: "applyCandidate", id: prompt.id });
+      inFlight = false;
+      if (resp.t === "error") {
+        render("error", { error: resp.message });
+        return;
+      }
+      if (resp.t === "completion" && resp.completion) {
+        const a = resp.completion.applied;
+        if (a?.status === "applied") {
+          render("saved", { pageUrl: a.pageUrl });
+          return;
+        }
+        if (a?.status === "skipped") {
+          render("skipped", { pageUrl: a.pageUrl });
+          return;
+        }
+        if (a?.status === "failed") {
+          render("error", { error: a.errorMessage || "apply failed" });
+          return;
+        }
+      }
+      render("error", { error: "unexpected response from background" });
+    } catch (e) {
+      inFlight = false;
+      render("error", { error: (e as Error).message || "send failed" });
+    }
+  }
+
+  async function doDeny() {
+    if (inFlight) return;
+    inFlight = true;
+    void send({ t: "denyCandidate", id: prompt.id });
+    root.remove();
+  }
+
+  render("prompt");
+}
+
+function makeButton(label: string, primary: boolean): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "nh-completion-button" + (primary ? " is-primary" : "");
+  b.textContent = label;
+  return b;
 }
 
 function labelForCompletionReason(reason: Extract<Msg, { t: "completionPrompt" }>["reason"]): string {
   switch (reason) {
+    case "activity":
+      return "Recent activity";
     case "action-click":
       return "Repeated action pattern";
     case "repetition":
@@ -878,6 +1016,55 @@ const COMPLETION_PROMPT_CSS = `
 
 #${COMPLETION_PROMPT_ROOT_ID} .nh-completion-button.is-primary:hover {
   background: rgba(34, 197, 94, 0.22);
+}
+
+/* link styled as a primary button for the success "View ↗" CTA. */
+#${COMPLETION_PROMPT_ROOT_ID} a.nh-completion-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+/* Inline spinner used during the saving state. */
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 8px;
+  vertical-align: -1px;
+  border: 1.5px solid rgba(255, 255, 255, 0.15);
+  border-top-color: rgba(134, 239, 172, 0.9);
+  border-radius: 50%;
+  animation: nh-completion-spin 0.7s linear infinite;
+}
+
+@keyframes nh-completion-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Saved state: a soft green accent on the title. */
+#${COMPLETION_PROMPT_ROOT_ID}.is-saved .nh-completion-title {
+  color: #86efac;
+}
+
+/* Error state: red border + red title. */
+#${COMPLETION_PROMPT_ROOT_ID}.is-error {
+  border-color: rgba(248, 113, 113, 0.35);
+}
+#${COMPLETION_PROMPT_ROOT_ID}.is-error .nh-completion-title {
+  color: #fca5a5;
+}
+#${COMPLETION_PROMPT_ROOT_ID}.is-error .nh-completion-body {
+  color: #fecaca;
+  /* Notion error strings can be long; wrap + clamp instead of stretching the bubble. */
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 `;
 

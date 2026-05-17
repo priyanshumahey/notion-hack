@@ -162,6 +162,12 @@ export interface DetectInput {
    * revisit. Owned by ingest, sourced from the completions store.
    */
   recentlyFiredRichUrls: Set<string>;
+  /**
+   * Exact URLs we've already fired a `content-dwell` trigger for recently.
+   * Dwell can re-emit every time the user revisits a page, which without
+   * this dedup creates duplicate candidates for the same artifact.
+   */
+  recentlyFiredDwellUrls: Set<string>;
 }
 
 /**
@@ -191,7 +197,7 @@ export function detectTriggers(input: DetectInput): Trigger[] {
   }
 
   // 3. Content-dwell — engaged with a rich page.
-  if (event.kind === "page-dwell") {
+  if (event.kind === "page-dwell" && !input.recentlyFiredDwellUrls.has(event.url)) {
     const dwell = event.meta as DwellMeta | undefined;
     const rich = scoreRichness(event.pageContext);
     if (dwell && rich.tier === "high-value" && dwell.foregroundMs >= DWELL_HIGH_VALUE_FOREGROUND_MS) {

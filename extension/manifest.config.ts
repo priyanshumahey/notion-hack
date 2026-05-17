@@ -6,9 +6,19 @@ export default defineManifest({
   name: "Notion Hack",
   description: "Basic React + Tailwind Chrome extension.",
   version: pkg.version,
+  icons: {
+    "16": "public/icon-16.png",
+    "48": "public/icon-48.png",
+    "128": "public/icon-128.png",
+  },
   action: {
     default_popup: "src/popup/index.html",
     default_title: "Notion Hack",
+    default_icon: {
+      "16": "public/icon-16.png",
+      "48": "public/icon-48.png",
+      "128": "public/icon-128.png",
+    },
   },
   background: {
     service_worker: "src/background/index.ts",
@@ -22,6 +32,13 @@ export default defineManifest({
       all_frames: true,
     },
   ],
-  permissions: ["storage", "tabs", "webNavigation", "activeTab", "scripting"],
+  permissions: [
+    "storage",
+    "tabs",
+    "webNavigation",
+    "activeTab",
+    "scripting",
+    "notifications",
+  ],
   host_permissions: ["<all_urls>"],
 });

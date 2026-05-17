@@ -15,10 +15,26 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   // Accept either OPENAI_KEY or OPENAI_API_KEY from .env.
   const openaiKey = env.OPENAI_KEY || env.OPENAI_API_KEY || "";
+  // Notion defaults — let a freshly-built install run without re-entering
+  // the token / parent / DB ids every time. Storage still wins at runtime.
+  const notionToken = env.NOTION_TOKEN || "";
+  const notionParentPageId = env.NOTION_PARENT_PAGE_ID || "";
+  const notionParentPageTitle = env.NOTION_PARENT_PAGE_TITLE || "";
+  const notionWorkspaceName = env.NOTION_WORKSPACE_NAME || "";
+  const notionObservationsDbId = env.NOTION_OBSERVATIONS_DB_ID || "";
+  const notionWorkflowsDbId = env.NOTION_WORKFLOWS_DB_ID || "";
+  const notionRunsDbId = env.NOTION_RUNS_DB_ID || "";
   return {
     plugins: [react(), tailwindcss(), crx({ manifest })],
     define: {
       __OPENAI_KEY_BUILD__: JSON.stringify(openaiKey),
+      __NOTION_TOKEN_BUILD__: JSON.stringify(notionToken),
+      __NOTION_PARENT_PAGE_ID_BUILD__: JSON.stringify(notionParentPageId),
+      __NOTION_PARENT_PAGE_TITLE_BUILD__: JSON.stringify(notionParentPageTitle),
+      __NOTION_WORKSPACE_NAME_BUILD__: JSON.stringify(notionWorkspaceName),
+      __NOTION_OBSERVATIONS_DB_ID_BUILD__: JSON.stringify(notionObservationsDbId),
+      __NOTION_WORKFLOWS_DB_ID_BUILD__: JSON.stringify(notionWorkflowsDbId),
+      __NOTION_RUNS_DB_ID_BUILD__: JSON.stringify(notionRunsDbId),
     },
     server: {
       port: 5173,

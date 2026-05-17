@@ -308,6 +308,7 @@ function StateBadge({ c }: { c: CompletionCandidate }) {
 
 function ReasonBadge({ reason }: { reason: CompletionCandidate["reason"] }) {
   const color: Record<CompletionCandidate["reason"], string> = {
+    "activity": "bg-slate-200 text-slate-800",
     "form-submit": "bg-emerald-100 text-emerald-800",
     "terminal-nav": "bg-sky-100 text-sky-800",
     "content-dwell": "bg-teal-100 text-teal-800",

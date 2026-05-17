@@ -1,4 +1,8 @@
-// OpenAI client — minimal, just what we need.
+// LLM client — minimal, just what we need.
+//
+// Backend: Azure OpenAI (chat.completions on a named deployment). The
+// deployment name (gpt-4o-mini) and api-version are baked into ENDPOINT;
+// auth is via the `api-key` header rather than `Authorization: Bearer`.
 //
 // One real call: judgeCandidate() → Judgement.
 // One health check: pingOpenAi() → {ok, error?} (for Settings "Test connection").
@@ -20,43 +24,186 @@ import type {
 } from "./types";
 
 const log = makeLog("bg");
-const MODEL = "gpt-4o-mini";
-const ENDPOINT = "https://api.openai.com/v1/chat/completions";
+// Azure OpenAI deployment endpoint. The deployment name in the path
+// determines the model; the body's `model` field is ignored, so we omit it.
+const ENDPOINT =
+  "https://priya-mjx9ubft-eastus2.cognitiveservices.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2025-01-01-preview";
 
-const SYSTEM_PROMPT = `You are a backend agent for a browser extension that watches a user's web activity and saves meaningful tasks/artifacts/patterns to their Notion workspace.
+const SYSTEM_PROMPT = `You are a backend agent for a browser extension that watches a user's web activity and decides what (if anything) is worth saving to their Notion workspace.
 
-You will receive a sequence of browser events and a TRIGGER REASON. Each event may include rich CONTEXT: the page's title, meta description, og:* tags, headings, JSON-LD structured data, a main-text excerpt, dwell metrics (foreground time, scroll depth, interactions), and (on form submissions) the submitted form's field labels and values. USE THIS CONTEXT — it is your primary source of truth. JSON-LD blocks especially often contain the exact information that should populate a Notion row.
+You will receive:
+  - EXISTING DATABASES — every destination DB already in the user's workspace, with its schema and a few of its most-recent rows so you can see what kind of items already live there.
+  - EXISTING WORKFLOWS — natural-language POLICIES the user has previously approved (e.g. "Save jobs from any company — user has approved Notion, OpenAI, DeepMind so far"). Each workflow points at a destination DB. Treat workflow.reasoning as the policy text and let it grow as more items are routed.
+  - RECENT ACTIVITY — every browser event in the last few minutes (navs, clicks, page-dwells, form submits) with full page-context where available.
+  - EXTENDED HISTORY — a compact one-line-per-page summary of nav events further back, used ONLY for detecting patterns (e.g. "user has viewed 2 other job postings this week").
 
-TRIGGER REASONS you may see:
-  - "form-submit": the user just submitted a form.
-  - "terminal-nav": the user just landed on a confirmation/success/thank-you-style page.
-  - "content-dwell": the user spent meaningful time engaging with a high-value content page (job posting, product, event, recipe, course, etc.). The page itself is the artifact — they didn't necessarily complete a transaction, they CONSUMED it intently.
-  - "repetition": the user has visited several distinct URLs that share the same canonicalized page-key pattern recently (e.g. multiple tweets from one author, multiple articles from one publisher, multiple product listings of a kind). The pattern is what's meaningful, not any single event.
-  - "action-click": the user repeatedly clicked the same UI element on the same host within minutes — same testid or same normalized label. Each click event represents one item the user acted on. We do NOT pre-filter by verb — the cluster might be Save / Bookmark / Like / Follow / Add to cart / Star / RSVP / Subscribe / Pin / Upvote / "Save Recipe" / "Add to my Notion" / a star icon / a heart icon / etc. — OR it might be something noisy (Delete, Next, Reply). YOU decide. If meaningful, PROPOSE A TRACKER DATABASE for the collection (e.g. "Bookmarked Tweets", "Saved Jobs", "Wishlist Items", "Saved Recipes", "Starred Repos"), and emit one row PER distinct item the user acted on, extracting what you can from each click's fingerprint text/accessibleName and from the surrounding page context. If individual items aren't separable from the click fingerprints, emit one summary row describing the pattern (e.g. "5 saves on allrecipes.com") and explain in reasoning what was acted on. If the clicks are clearly noise (Delete in inbox, pagination, dismissing notifications), set meaningful=false.
-  - "rich-page": the user landed on a page that LOOKS LIKE a saveable artifact (recipe, product, job posting, article, event, listing, etc.) based on JSON-LD / og:type / structured data. NO dwell or repetition was required to fire this — it fires speculatively on the page load. Use it as a routing opportunity: if the page's artifact-type matches an EXISTING DATABASE (e.g. allrecipes.com Recipe page when "Saved Recipes" exists), set meaningful=true with mode="use-existing" pointing at that DB and emit ONE row for this artifact. If no existing DB is a natural fit and the page doesn't seem worth saving on its own, set meaningful=false. Be CONSERVATIVE about creating brand-new databases from a single rich-page trigger — prefer use-existing or meaningful=false.
+Your job: decide whether the user's recent activity contains a single ARTIFACT worth saving to one of these databases, and if so, return the proposal.
 
-CRITICAL — REUSE EXISTING DATABASES AGGRESSIVELY: If EXISTING DATABASES contains a DB whose name or description matches the artifact type (e.g. "Saved Recipes" for a Recipe page, "Saved Jobs" for a JobPosting, "Wishlist" for a Product), you MUST set mode="use-existing" and existingId to that DB's id. The user has ALREADY decided this is a destination they care about; routing a new item there is the entire point. Only fall back to create-new when no existing DB is a remotely plausible fit. When in doubt between use-existing and create-new, prefer use-existing. The schema of the existing DB tells you which columns to populate.
+KEY PRINCIPLES — lean toward letting the user save things, not toward gatekeeping:
 
-Your job:
+0. ANCHOR ON THE TRIGGER — the artifact under consideration is the SINGLE event marked TRIGGER (the newest event in RECENT ACTIVITY). Older events are CONTEXT ONLY, used for two narrow purposes:
+   (a) detecting repetition patterns ("user has viewed N similar items before");
+   (b) helping you choose the right destination DB / workflow for the TRIGGER.
+   Never propose saving an OLDER event just because it has a better existing-DB or workflow match. If the TRIGGER itself doesn't fit anything, return meaningful=false — do NOT reach back into earlier context for a save target.
 
-1. Decide whether the sequence represents something MEANINGFUL — worth saving to Notion. Be generous on "content-dwell" and "repetition" triggers: the heuristics have already filtered for engagement and recurrence, your job is to recognize what kind of artifact this is.
-   - Meaningful examples: submitted a job application, made a purchase, signed up, scheduled a meeting, RSVP'd, saved/bookmarked, completed a transaction, engaged deeply with a job posting or product or event, recurring pattern of consuming content from a specific source (e.g. tweets from one account, articles from one publisher, recipes from one site), repeated action-clicks on a host (e.g. bookmarking tweets, saving jobs, wishlisting products, following authors).
-   - NOT meaningful: random searches, abandoned forms, login screens, cookie banners, captchas, filter changes, app shells, ephemeral notifications.
+   TOPIC SWITCHES: if the TRIGGER's host or apparent category differs from earlier events in the window (e.g. window starts on openai.com/careers, ends on allrecipes.com), the earlier events are a CLOSED EPISODE. They no longer represent the user's current intent. Do not save from them. The user already had a chance to save them when each one was the freshest event; their own moment has passed.
 
-2. If meaningful, produce a NOTION PROPOSAL:
-   a. Target database — reuse one from "EXISTING DATABASES" (mode: "use-existing", set existingId) or propose a new one (mode: "create-new", existingId: null). Prefer reusing when the artifact fits naturally.
-   b. For a new database: a short descriptive name, one-line description, schema of 4-8 properties. Property types: title, rich_text, url, date, select, multi_select, number. EXACTLY ONE property must be type "title". Use options[] only for select/multi_select; otherwise pass [].
-   c. The row values — array of {property, value} pairs. Each property name MUST match the schema. Value types:
-      - title/rich_text/url/select: string
-      - date: ISO 8601
-      - number: number
-      - multi_select: array of strings
-   d. For repetition: the row should represent the PATTERN (e.g. an entry in "Followed Authors" or "Frequently Read Publishers"), not the most recent single instance. The database schema should make sense for an evolving collection. Use JSON-LD author/publisher fields when present.
-   e. Extract values only from observable data. Prefer JSON-LD when available — it's authoritative. Omit cells where the value isn't observable.
+   The TRIGGER event is shown in FULL detail (page-context, JSON-LD, headings). Earlier events are compact summaries. That asymmetry is intentional — only the TRIGGER carries the artifact.
 
-3. If NOT meaningful, set meaningful=false, give a one-sentence reasoning, proposal=null.
+   WHAT THE ARTIFACT IS depends on the TRIGGER's kind — read this carefully, it's the most common failure mode:
+   - If the TRIGGER is a nav or page-dwell to a specific item page (job detail, recipe page, product page, article, paper, etc.), the artifact IS that page.
+   - If the TRIGGER is a CLICK on a listings / search / index / careers / catalog page, the artifact is the CLICKED ITEM, extracted from the click target's label/role (e.g. target: <link> "Data Scientist, Codex · Data Science · San Francisco" → that's the artifact). The TRIGGER's pageKey will be the listings URL (e.g. openai.com/careers/search, allrecipes.com, amazon.com/s) but the actual artifact is the job/product/recipe/etc the user just clicked. Treat that click as an act of opening the item — the user has declared interest in it even if no nav event has followed yet. DO NOT dismiss it as "just a listings page" — the click target is the artifact.
+   - If the TRIGGER is a click revealing a modal/expander on the same page, the artifact is whatever the click revealed (from the click label or subsequent page-context).
 
-Always return STRICT JSON matching this exact shape (no markdown, no commentary):
+1. CATEGORY GATE — different things go in different databases.
+   - Before ANY routing decision, identify the ARTIFACT CATEGORY of the TRIGGER: job posting, recipe, product, article, paper, person, place, video, repo, etc.
+   - An existing DB is ONLY a candidate if its category matches the TRIGGER's. Match on ALL of: name, description, AND sample-row content. If the existing DB is "Saved Recipes" (rows about food) and the TRIGGER is a job posting, that DB is NOT a fit — no matter how flexible its schema is. Do not force-route across categories.
+   - If NO existing DB matches the TRIGGER's category:
+       a) If the pattern threshold is met (≥2 similar items across RECENT ACTIVITY + EXTENDED HISTORY) → propose mode="create-new" with a sensibly-named NEW DB for that category.
+       b) Otherwise → return meaningful=false. Cross-category mis-routing is always worse than waiting.
+   - Cross-category examples (never route these together): jobs↔recipes, products↔articles, people↔places, papers↔videos, code-repos↔blog-posts.
+
+2. PATTERNS BEAT SINGLE PAGES for NEW databases.
+   - Routing to an EXISTING database that matches the TRIGGER's category? Single visit is enough — the user has already declared they care about this category.
+   - Proposing a NEW database from scratch? Require at least ~2 DISTINCT artifacts of the same category in RECENT ACTIVITY + EXTENDED HISTORY combined. Count by DISTINCT artifact (different recipe titles, different job postings), NOT by event count — twenty clicks on the same one recipe page is still ONE artifact and is NOT a pattern. Two or three different ones in the same window IS.
+   - You see distinct artifacts by looking at pageKey + page title + click label. Three different recipe names visible in the context ("Shoyu Chicken", "Easy Mexican Casserole", "A Great Greek Pasta Salad") is unambiguous proof of interest in recipes, even if each shows up as a one-line summary.
+   - The patterns aren't about URLs being identical — they're about KIND. Two different job postings (different companies) is a pattern. A recipe page + an article-about-cooking is not.
+   - FOR CLICKS ON LISTINGS PAGES: the click TARGET's LABEL is the artifact identity, NOT the pageKey. Five clicks on the SAME careers-search URL with FIVE different job-title labels = FIVE distinct job artifacts. Do NOT dismiss them as "all on the same page" — the page is just where the user is browsing; each click is a discovery of a new item. Concretely: distinct click labels that contain distinct item names (job titles, recipe names, product names, paper titles) count as distinct artifacts, and ≥ 2 of them is enough to justify creating a new DB.
+   - The threshold is GENEROUS by design: 2 distinct artifacts is enough, 3+ is overwhelming evidence. Do not demand more. The whole point of this agent is to spin up the DB the moment a pattern is visible, not to wait until the user has hand-collected ten things.
+   - When the threshold IS met and no existing DB fits the category, you MUST propose mode="create-new" with a sensibly-named DB. Don't return meaningful=false just because the DB doesn't exist yet — that's exactly when it should be created.
+
+3. REUSE EXISTING DATABASES — but only inside the same category as the TRIGGER.
+   - When the category matches: prefer mode="use-existing" and existingId of that DB. Copy the row's property names EXACTLY to the existing DB's column names.
+   - The sample rows under each DB are the strongest category signal. If your new row would NOT look like a sibling of those samples, that DB is the WRONG category — don't use it.
+   - Never duplicate a DB within the same category (don't propose "Jobs" if "Saved Jobs" already exists with job rows).
+
+4. REUSE EXISTING WORKFLOWS — they are STANDING APPROVALS for routing the TRIGGER, not licenses to save older events.
+   - Each workflow.reasoning describes the policy. If the TRIGGER matches a workflow's policy (same kind of artifact, same general source), reuse the workflow's targetDatabaseId. Mention the workflow in your reasoning ("matches workflow X").
+   - sourceApps is a HINT, not a hard filter. A "Save jobs" workflow that listed jobs.ashbyhq.com should still accept a greenhouse.io job posting — as long as the TRIGGER is the job posting.
+   - A workflow only fires if the TRIGGER fits its category. A "Save recipes" workflow does NOT accept a job posting; a "Save jobs" workflow does NOT fire when the TRIGGER is a recipe even if earlier events in the window were jobs.
+
+5. EXTRACT FROM THE PAGE — use JSON-LD when present (it's authoritative), otherwise fall back to og:* tags, headings, then mainText. Extract from the TRIGGER's page-context only. Omit cells where the value isn't observable; don't hallucinate.
+
+6. WHEN GENUINELY UNSURE, RETURN meaningful=false — but "unsure" means truly ambiguous: you can't tell what the item is, the category is unclear, or the signal is one fleeting click. It does NOT mean "I see a clear pattern but the DB doesn't exist yet" and it does NOT mean "the TRIGGER is a click on a listings page so I should bail". Failing to act on an obvious pattern is also a failure mode, and the more common one in practice. If the user has spent ~1 minute clicking through ≥ 2 distinct items of the same category, that IS a save signal — propose create-new and route the TRIGGER's item into it. The user can rename or delete a freshly-created DB in seconds; they cannot un-miss the moment of intent you ignored. Default toward acting; reserve meaningful=false for cases where you genuinely cannot identify an artifact or its category.
+
+WHAT'S NOT WORTH SAVING:
+  - Login screens, captchas, cookie banners, app shells, settings pages
+  - The listings/search/index PAGE ITSELF as a row (you would never save the URL openai.com/careers/search or amazon.com/s?k=... as a saved item). HOWEVER, individual CLICKS on items WITHIN a listings page ARE artifact signals — each click target is an item the user is investigating, and those items ARE worth saving. Do not conflate "the listings page is not an artifact" with "clicks on tiles in that listings page are not artifacts".
+  - Filter / sort changes, pagination clicks, dismissing notifications, sidebar/menu toggles
+
+WORKED EXAMPLE — recipes, no existing DB, threshold met → create-new
+
+EXISTING DATABASES: (no Recipes DB; maybe a Saved Jobs DB exists, irrelevant here)
+EXISTING WORKFLOWS: (none relevant — a Saved Jobs workflow exists but doesn't apply)
+RECENT ACTIVITY (compact, oldest → newest, ending with TRIGGER):
+  [07:52:19] click "Shoyu Chicken" → allrecipes.com
+  [07:52:20] nav → allrecipes.com/recipe/:id/shoyu-chicken
+  [07:52:24] page-dwell → allrecipes.com/recipe/:id/shoyu-chicken
+  [07:52:26] nav → allrecipes.com/recipe/:id/easy-mexican-casserole
+  [07:52:34] page-dwell → allrecipes.com/recipe/:id/easy-mexican-casserole
+  [07:52:37] click "A Great Greek Pasta Salad" → allrecipes.com
+  [07:52:37] TRIGGER: click "View Recipe" → allrecipes.com/recipe/:id/a-great-greek-pasta-salad
+    (full page-context with JSON-LD Recipe schema, ingredients, prep time, etc.)
+
+CORRECT analysis:
+  - TRIGGER artifact category = recipe.
+  - Distinct recipe artifacts visible in context: Shoyu Chicken, Easy Mexican Casserole, A Great Greek Pasta Salad = THREE. Pattern threshold (≥2) is clearly met.
+  - No existing DB matches the recipe category. Category gate prevents routing into Saved Jobs.
+  - Therefore: propose mode="create-new" for a "Saved Recipes" DB. Do NOT return meaningful=false — the user has clearly demonstrated interest, and the whole point of this system is to spin up a DB when it's earned.
+
+CORRECT output (shape, not literal):
+{
+  "meaningful": true,
+  "confidence": 0.88,
+  "reasoning": "Trigger is a recipe page. User viewed 3 distinct recipes in the last minute (Shoyu Chicken, Easy Mexican Casserole, Greek Pasta Salad) — clear pattern. No existing Recipes DB. Proposing a new 'Saved Recipes' DB.",
+  "proposal": {
+    "database": {
+      "mode": "create-new",
+      "existingId": null,
+      "name": "Saved Recipes",
+      "description": "Recipes the user is interested in cooking. Captured from recipe sites.",
+      "properties": [
+        { "name": "Title", "type": "title", "options": [] },
+        { "name": "URL", "type": "url", "options": [] },
+        { "name": "Source", "type": "select", "options": [] },
+        { "name": "Prep Time", "type": "rich_text", "options": [] },
+        { "name": "Cuisine", "type": "select", "options": [] },
+        { "name": "Tags", "type": "multi_search", "options": [] }
+      ]
+    },
+    "row": [
+      { "property": "Title", "value": "A Great Greek Pasta Salad" },
+      { "property": "URL", "value": "https://www.allrecipes.com/recipe/.../a-great-greek-pasta-salad" },
+      { "property": "Source", "value": "Allrecipes" },
+      { "property": "Cuisine", "value": "Greek" }
+    ]
+  }
+}
+(Pick property types from the allowed set; the Tags example above is illustrative — use "multi_select" not "multi_search".)
+
+WRONG behavior to avoid in this scenario:
+  - "User has not viewed enough similar items" → FALSE. Three distinct recipes in 25 seconds is plenty.
+  - Routing into Saved Jobs because it's the only DB that exists → category mismatch, forbidden by principle 1.
+  - Returning meaningful=false on this — that's the failure mode this example exists to prevent.
+
+WORKED EXAMPLE 2 — careers page, ONLY clicks on tiles (no individual job-detail navs yet) → create-new
+
+EXISTING DATABASES: (none relevant — maybe an unrelated Saved Recipes DB exists, doesn't matter)
+EXISTING WORKFLOWS: (none)
+RECENT ACTIVITY (compact, oldest → newest, ending with TRIGGER):
+  [07:59:24] nav → openai.com/careers/search
+  [07:59:40] click "AI Success Engineer · AI Success · Sydney, Australia" → openai.com/careers/search
+  [07:59:45] click "Applied AI Engineer, Codex Core Agent · Codex Engineering · 4 locations" → openai.com/careers/search
+  [07:59:54] click "ChatGPT Performance Engineer · Applied AI Engineering · 4 locations" → openai.com/careers/search
+  [08:00:00] click "Counsel, AI Policy · Legal · 2 locations" → openai.com/careers/search
+  [08:00:41] click "Data Center Controls Network Engineer · Datacenter Design · San Francisco" → openai.com/careers/search
+  [08:00:48] TRIGGER: click "Data Scientist, Codex · Data Science · San Francisco" → openai.com/careers/search
+    (full page-context: openai.com/careers/search — a listings page; the TRIGGER's fingerprint carries the clicked job tile's label)
+
+CORRECT analysis:
+  - TRIGGER is a CLICK on a job-tile on a careers listings page. pageKey is the careers URL, but per principle 0 the ARTIFACT is the CLICKED ITEM: "Data Scientist, Codex" on the OpenAI Data Science team in San Francisco. The TRIGGER's fingerprint label is where the artifact lives.
+  - Distinct click labels visible across recent activity: AI Success Engineer, Applied AI Engineer, ChatGPT Performance Engineer, Counsel AI Policy, Data Center Controls Network Engineer, Data Scientist Codex = SIX distinct job artifacts in ~90 seconds. Pattern threshold (≥ 2) is massively exceeded.
+  - No existing DB matches the job category. Category gate forbids routing into Saved Recipes.
+  - Therefore: propose mode="create-new" for a "Saved Jobs" DB and route the TRIGGER's job (Data Scientist, Codex) into it.
+
+CORRECT output (shape, not literal):
+{
+  "meaningful": true,
+  "confidence": 0.9,
+  "reasoning": "Trigger is a click on a specific job tile (Data Scientist, Codex) on the openai.com careers page. User has clicked through 6 distinct job postings in under 90 seconds — strong, unambiguous job-search pattern. No existing Jobs DB. Creating one.",
+  "proposal": {
+    "database": {
+      "mode": "create-new",
+      "existingId": null,
+      "name": "Saved Jobs",
+      "description": "Job postings the user is interested in. Captured from company careers pages and job boards.",
+      "properties": [
+        { "name": "Title", "type": "title", "options": [] },
+        { "name": "Company", "type": "select", "options": [] },
+        { "name": "Team", "type": "rich_text", "options": [] },
+        { "name": "Location", "type": "rich_text", "options": [] },
+        { "name": "URL", "type": "url", "options": [] },
+        { "name": "Source", "type": "select", "options": [] }
+      ]
+    },
+    "row": [
+      { "property": "Title", "value": "Data Scientist, Codex" },
+      { "property": "Company", "value": "OpenAI" },
+      { "property": "Team", "value": "Data Science" },
+      { "property": "Location", "value": "San Francisco" },
+      { "property": "URL", "value": "https://openai.com/careers/search" },
+      { "property": "Source", "value": "openai.com/careers" }
+    ]
+  }
+}
+
+WRONG behavior this example exists to prevent (the exact bug observed in production):
+  - "The earlier events do not represent unique job postings" → FALSE. Each click label is a distinct job title — six distinct artifacts.
+  - "TRIGGER pageKey is just the careers search page, so the artifact is a listings page and should be skipped" → WRONG. When the TRIGGER is a click on a tile, the click TARGET's label is the artifact, not the pageKey.
+  - "We don't have a Jobs DB so we can't route this" → WRONG. The whole point of mode="create-new" is to spin up the DB the moment the pattern is earned. Six distinct jobs is way past earned.
+  - Returning meaningful=false on this scenario is the primary failure mode of this agent. Don't.
+
+OUTPUT — STRICT JSON, no markdown, no commentary. Use this exact shape:
 
 {
   "meaningful": boolean,
@@ -72,34 +219,67 @@ Always return STRICT JSON matching this exact shape (no markdown, no commentary)
     },
     "row": [{ "property": string, "value": string | number | string[] }]
   }
-}`;
+}
+
+For mode="use-existing", set existingId AND copy the existing DB's schema verbatim into properties (column names + types). The row property names MUST match. Value types: string for title/rich_text/url/select, ISO 8601 for date, number for number, string[] for multi_select. EXACTLY ONE property must be type "title".`;
 
 export interface KnownDatabase {
   id: string;
   name: string;
+  description: string;
   properties: NotionPropertySpec[];
+  /**
+   * A handful of recent rows from this DB, collapsed to
+   * `propertyName -> string`. Surfaced in the prompt so the LLM can
+   * pattern-match what already lives here. Best-effort; may be empty.
+   */
+  recentRows?: Array<{ properties: Record<string, string> }>;
+}
+
+/**
+ * A workflow the user has previously approved (a row in their Workflows DB).
+ * The judge treats matching workflows as STANDING APPROVALS: if a new
+ * candidate looks like it would fire the same workflow, reuse the workflow's
+ * target DB instead of proposing a new one — even if no destination DB
+ * is an obvious name match.
+ */
+export interface KnownWorkflow {
+  id: string;
+  name: string;
+  status: string;
+  runMode: string;
+  targetDatabaseId: string;
+  targetDatabaseName: string;
+  sourceApps: string[];
+  reasoning: string;
+  runCount: number;
 }
 
 export async function judgeCandidate(
   candidate: CompletionCandidate,
   knownDatabases: KnownDatabase[],
+  knownWorkflows: KnownWorkflow[],
 ): Promise<Judgement> {
   const key = await getOpenAiKey();
   if (!key) {
     throw new Error("no-openai-key");
   }
 
-  const userPrompt = buildUserPrompt(candidate, knownDatabases);
-  log("judge → openai", { reason: candidate.reason, ctxLen: candidate.context.length });
+  const userPrompt = buildUserPrompt(candidate, knownDatabases, knownWorkflows);
+  log("judge → openai", {
+    reason: candidate.reason,
+    ctxLen: candidate.context.length,
+    knownDbs: knownDatabases.length,
+    knownWorkflows: knownWorkflows.length,
+  });
 
   const resp = await fetch(ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
+      "api-key": key,
     },
     body: JSON.stringify({
-      model: MODEL,
       response_format: { type: "json_object" },
       temperature: 0.2,
       messages: [
@@ -128,8 +308,19 @@ export async function pingOpenAi(): Promise<{ ok: boolean; error?: string }> {
   const key = await getOpenAiKey();
   if (!key) return { ok: false, error: "no-openai-key" };
   try {
-    const resp = await fetch("https://api.openai.com/v1/models", {
-      headers: { Authorization: `Bearer ${key}` },
+    // Azure has no public `/v1/models`-equivalent we can hit with a key, so
+    // do the smallest possible chat completion against the same deployment.
+    const resp = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": key,
+      },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+        temperature: 0,
+      }),
     });
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
@@ -145,49 +336,107 @@ export async function pingOpenAi(): Promise<{ ok: boolean; error?: string }> {
 // Prompt construction + validation
 // ---------------------------------------------------------------------------
 
-function buildUserPrompt(candidate: CompletionCandidate, dbs: KnownDatabase[]): string {
+function buildUserPrompt(
+  candidate: CompletionCandidate,
+  dbs: KnownDatabase[],
+  workflows: KnownWorkflow[],
+): string {
+  // ---- EXISTING DATABASES (with sample rows) ----------------------------
   const dbBlock = dbs.length
     ? dbs
-        .map(
-          (d) =>
-            `- id: ${d.id}\n  name: ${d.name}\n  properties: ${d.properties
-              .map((p) => `${p.name}:${p.type}`)
-              .join(", ")}`,
-        )
+        .map((d) => {
+          const propLine = d.properties
+            .map((p) => `${p.name}:${p.type}`)
+            .join(", ");
+          const descLine = d.description
+            ? `\n  description: ${truncateLine(d.description, 200)}`
+            : "";
+          const rows = d.recentRows ?? [];
+          const sampleBlock = rows.length
+            ? "\n  recent rows:\n" +
+              rows
+                .slice(0, 5)
+                .map((r) => {
+                  const parts = Object.entries(r.properties)
+                    .filter(([, v]) => v && v.length > 0)
+                    .map(([k, v]) => `${k}=${truncateLine(v, 80)}`)
+                    .join(" | ");
+                  return `    · ${parts || "(empty row)"}`;
+                })
+                .join("\n")
+            : "";
+          return `- id: ${d.id}\n  name: ${d.name}${descLine}\n  properties: ${propLine}${sampleBlock}`;
+        })
         .join("\n")
-    : "(none — propose a new database)";
+    : "(none — propose a new database only if the activity contains a clear recurring pattern across 2+ similar items)";
 
-  // Budget: ~24 KB of event text total. The trigger event always gets its
-  // full context; earlier events are summarized. If we're still over budget
-  // we drop oldest events first.
-  const BUDGET = 24_000;
-  const trigger = candidate.trigger;
-  const triggerBlock = formatEventFull(trigger, /*isTrigger*/ true);
+  // ---- EXISTING WORKFLOWS (policies) -----------------------------------
+  const wfBlock = workflows.length
+    ? workflows
+        .map((w) => {
+          const apps = w.sourceApps.length ? w.sourceApps.join(", ") : "(any)";
+          const why = w.reasoning ? truncateLine(w.reasoning, 400) : "";
+          return [
+            `- workflow: ${w.name}`,
+            `  status: ${w.status}  runMode: ${w.runMode}  runs: ${w.runCount}`,
+            `  targetDatabaseId: ${w.targetDatabaseId}`,
+            `  targetDatabaseName: ${w.targetDatabaseName}`,
+            `  sourceApps: ${apps}`,
+            why ? `  policy: ${why}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n");
+        })
+        .join("\n")
+    : "(none — no prior workflows to reuse)";
 
-  // Earlier events: newest first so the freshest context is closest to the
-  // trigger if we have to drop some.
-  const earlier = candidate.context.filter((e) => e.id !== trigger.id);
-  const earlierLines: string[] = [];
-  let used = triggerBlock.length;
-  for (const e of earlier.slice().reverse()) {
-    const line = formatEventCompact(e);
-    if (used + line.length > BUDGET) {
-      earlierLines.push(`… ${earlier.length - earlierLines.length} earlier events omitted`);
+  // ---- RECENT ACTIVITY (last few minutes, full context) ----------------
+  // candidate.context already carries the rolling window from ingest.
+  // Show every event with full page-context where available. Budget ~16 KB.
+  const BUDGET = 16_000;
+  const recentEvents = candidate.context.length ? candidate.context : [candidate.trigger];
+  const recentBlocks: string[] = [];
+  let used = 0;
+  // newest first — if budget bites we drop oldest
+  for (const e of recentEvents.slice().reverse()) {
+    const isTrigger = e.id === candidate.trigger.id;
+    // Full detail for the TRIGGER only. Older events are compact one-liners
+    // — that asymmetry tells the LLM which event is the artifact under
+    // consideration (see principle 0 in the system prompt).
+    const block = isTrigger ? formatEventFull(e, /*isTrigger*/ true) : formatEventCompact(e);
+    if (used + block.length > BUDGET) {
+      recentBlocks.push(`… ${recentEvents.length - recentBlocks.length} earlier events omitted`);
       break;
     }
-    earlierLines.unshift(line);
-    used += line.length;
+    recentBlocks.unshift(block);
+    used += block.length;
   }
 
+  // ---- EXTENDED HISTORY (one-liners, days back) ------------------------
+  const extHistRaw = candidate.extendedHistory ?? [];
+  const extHistBlock = extHistRaw.length
+    ? extHistRaw
+        .slice(0, 60)
+        .map((h) => {
+          const day = new Date(h.ts).toISOString().slice(0, 10);
+          const title = h.title ? ` "${truncateLine(h.title, 80)}"` : "";
+          return `- [${day}] ${h.pageKey}${title}`;
+        })
+        .join("\n")
+    : "(none)";
+
   return [
-    `EXISTING DATABASES:`,
+    `EXISTING DATABASES (only route here if the artifact's CATEGORY matches the DB's category — checked via name, description, AND sample rows):`,
     dbBlock,
     ``,
-    `EVENT SEQUENCE (oldest → newest, summaries):`,
-    earlierLines.length ? earlierLines.join("\n") : "(no prior context in window)",
+    `EXISTING WORKFLOWS (prior user approvals — reuse their targetDatabaseId when current activity fits the policy AND the category):`,
+    wfBlock,
     ``,
-    `TRIGGER EVENT (${candidate.reason}${candidate.triggerNote ? `: ${candidate.triggerNote}` : ""}):`,
-    triggerBlock,
+    `RECENT ACTIVITY (last few minutes, oldest → newest — the TRIGGER event at the end is the artifact under consideration and is shown in full; earlier events are CONTEXT ONLY, summarized in one line each):`,
+    recentBlocks.length ? recentBlocks.join("\n") : "(no events)",
+    ``,
+    `EXTENDED HISTORY (older nav events — use ONLY to recognize patterns like "user has viewed N similar items before"):`,
+    extHistBlock,
   ].join("\n");
 }
 
