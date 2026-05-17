@@ -222,6 +222,4 @@ export interface CompletionCandidate {
     auto?: boolean;
   };
   hybridAction?: HybridActionOverride;
-  /** User-authored instruction captured from the page prompt. */
-  userInstruction?: string;
 }

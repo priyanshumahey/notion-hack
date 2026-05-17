@@ -88,13 +88,6 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
       return { t: "ok" };
     }
     case "setCompletionStatus": {
-      if (msg.status === "promoted" && msg.instruction?.trim()) {
-        const c = await completions.get(msg.id);
-        if (c) {
-          c.userInstruction = msg.instruction.trim();
-          await completions.update(c);
-        }
-      }
       const c = msg.status === "promoted"
         ? await applyCandidate(msg.id)
         : await denyCandidate(msg.id);
