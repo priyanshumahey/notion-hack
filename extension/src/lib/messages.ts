@@ -17,6 +17,12 @@ export type Msg =
       reason: CompletionCandidate["reason"];
       databaseName?: string;
       confidence?: number;
+      triggerKind?: CompletionCandidate["trigger"]["kind"];
+      site?: string;
+      pageTitle?: string;
+      targetLabel?: string;
+      triggerNote?: string;
+      reasoning?: string;
     }
   // popup → bg : events
   | { t: "getRecent"; limit: number }

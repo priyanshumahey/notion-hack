@@ -218,12 +218,19 @@ async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): 
 async function notifyCompletionPrompt(candidate: CompletionCandidate): Promise<void> {
   const tabId = candidate.trigger.tabId;
   if (tabId < 0) return;
+  const fp = candidate.trigger.fingerprint;
   await chrome.tabs.sendMessage(tabId, {
     t: "completionPrompt",
     id: candidate.id,
     reason: candidate.reason,
     databaseName: candidate.judgement?.proposal?.database.name,
     confidence: candidate.judgement?.confidence,
+    triggerKind: candidate.trigger.kind,
+    site: candidate.scope.hosts[0],
+    pageTitle: candidate.trigger.pageContext?.title,
+    targetLabel: fp?.accessibleName || fp?.text || fp?.testid || fp?.role || fp?.tag,
+    triggerNote: candidate.triggerNote,
+    reasoning: candidate.judgement?.reasoning,
   });
 }
 

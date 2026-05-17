@@ -459,6 +459,21 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   body.className = "nh-completion-body";
   body.textContent = "Would you like to save it";
 
+  const details = document.createElement("div");
+  details.className = "nh-completion-details";
+  for (const item of completionPromptDetails(prompt)) {
+    const row = document.createElement("div");
+    row.className = "nh-completion-detail-row";
+    const label = document.createElement("span");
+    label.className = "nh-completion-detail-label";
+    label.textContent = item.label;
+    const value = document.createElement("span");
+    value.className = "nh-completion-detail-value";
+    value.textContent = item.value;
+    row.append(label, value);
+    details.appendChild(row);
+  }
+
   const meta = document.createElement("div");
   meta.className = "nh-completion-meta";
   meta.textContent = prompt.databaseName || labelForCompletionReason(prompt.reason);
@@ -539,8 +554,22 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   });
 
   actions.append(yes, save, no);
-  root.append(title, body, meta, actions);
+  root.append(title, body, details, meta, actions);
   document.documentElement.appendChild(root);
+}
+
+function completionPromptDetails(
+  prompt: Extract<Msg, { t: "completionPrompt" }>,
+): { label: string; value: string }[] {
+  const out: { label: string; value: string }[] = [
+    { label: "Type", value: `${prompt.triggerKind ?? "event"} / ${labelForCompletionReason(prompt.reason)}` },
+  ];
+  if (prompt.site) out.push({ label: "Site", value: prompt.site });
+  if (prompt.targetLabel) out.push({ label: "Target", value: prompt.targetLabel });
+  if (prompt.pageTitle) out.push({ label: "Page", value: prompt.pageTitle });
+  if (prompt.triggerNote) out.push({ label: "Pattern", value: prompt.triggerNote });
+  if (prompt.reasoning) out.push({ label: "Why", value: prompt.reasoning });
+  return out;
 }
 
 function labelForCompletionReason(reason: Extract<Msg, { t: "completionPrompt" }>["reason"]): string {
@@ -884,6 +913,39 @@ const COMPLETION_PROMPT_CSS = `
   font-size: 13px;
   line-height: 1.35;
   font-weight: 400;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-details {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-detail-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-detail-label {
+  color: #6b7280;
+  font-size: 10px;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+#${COMPLETION_PROMPT_ROOT_ID} .nh-completion-detail-value {
+  overflow: hidden;
+  color: #d7dde6;
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #${COMPLETION_PROMPT_ROOT_ID} .nh-completion-meta {
