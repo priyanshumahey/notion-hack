@@ -13,13 +13,22 @@ export function NotionView() {
   const [view, setView] = useState<View>({ kind: "list" });
   const [workspace, setWorkspace] = useState<string>("Mock Notion");
   const [databases, setDatabases] = useState<NotionDatabase[]>([]);
+  const [autoMaster, setAutoMaster] = useState<boolean>(true);
+  const [autoByDb, setAutoByDb] = useState<Record<string, boolean>>({});
   const timerRef = useRef<number | null>(null);
 
   async function refreshList() {
-    const resp = await send({ t: "notionListDatabases" });
-    if (resp.t === "notionDatabases") {
-      setDatabases(resp.databases);
-      setWorkspace(resp.workspace);
+    const [dbResp, cfgResp] = await Promise.all([
+      send({ t: "notionListDatabases" }),
+      send({ t: "getAutoApplyConfig" }),
+    ]);
+    if (dbResp.t === "notionDatabases") {
+      setDatabases(dbResp.databases);
+      setWorkspace(dbResp.workspace);
+    }
+    if (cfgResp.t === "autoApplyConfig") {
+      setAutoMaster(cfgResp.master);
+      setAutoByDb(cfgResp.byDb);
     }
   }
 
@@ -36,6 +45,18 @@ export function NotionView() {
     await send({ t: "notionClearAll" });
     setView({ kind: "list" });
     refreshList();
+  }
+
+  async function toggleDbAuto(dbId: string, next: boolean) {
+    setAutoByDb((prev) => ({ ...prev, [dbId]: next }));
+    await send({ t: "setAutoApplyForDb", dbId, enabled: next });
+  }
+
+  /** Resolve effective auto-apply for a DB: master AND (explicit value OR default true). */
+  function autoFor(dbId: string): boolean {
+    if (!autoMaster) return false;
+    if (dbId in autoByDb) return autoByDb[dbId];
+    return true;
   }
 
   return (
@@ -72,6 +93,9 @@ export function NotionView() {
       {view.kind === "list" ? (
         <DatabaseList
           databases={databases}
+          autoMaster={autoMaster}
+          autoFor={autoFor}
+          onToggleAuto={toggleDbAuto}
           onOpen={(id) => setView({ kind: "detail", databaseId: id })}
         />
       ) : (
@@ -87,9 +111,15 @@ export function NotionView() {
 
 function DatabaseList({
   databases,
+  autoMaster,
+  autoFor,
+  onToggleAuto,
   onOpen,
 }: {
   databases: NotionDatabase[];
+  autoMaster: boolean;
+  autoFor: (dbId: string) => boolean;
+  onToggleAuto: (dbId: string, next: boolean) => void;
   onOpen: (id: string) => void;
 }) {
   if (databases.length === 0) {
@@ -101,37 +131,96 @@ function DatabaseList({
   }
   return (
     <ul className="flex-1 overflow-auto divide-y divide-slate-100">
-      {databases.map((db) => (
-        <li key={db.id}>
-          <button
-            onClick={() => onOpen(db.id)}
-            className="w-full text-left px-4 py-2.5 hover:bg-slate-50"
-          >
-            <div className="flex items-baseline gap-2">
-              <span className="font-medium text-slate-800 text-sm truncate">{db.name}</span>
-              <span className="text-[10px] text-slate-400 tabular-nums shrink-0">
-                {db.rowCount} row{db.rowCount === 1 ? "" : "s"}
-              </span>
-            </div>
-            {db.description && (
-              <p className="mt-0.5 text-[11px] text-slate-600 line-clamp-2">{db.description}</p>
-            )}
-            <div className="mt-1 flex flex-wrap gap-1">
-              {db.properties.map((p) => (
-                <span
-                  key={p.name}
-                  className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] text-slate-700"
-                  title={p.type}
-                >
-                  {p.name}
-                  <span className="text-slate-400 ml-1">{p.type}</span>
+      {databases.map((db) => {
+        const auto = autoFor(db.id);
+        return (
+          <li key={db.id} className="flex items-stretch">
+            <button
+              onClick={() => onOpen(db.id)}
+              className="flex-1 text-left px-4 py-2.5 hover:bg-slate-50 min-w-0"
+            >
+              <div className="flex items-baseline gap-2">
+                <span className="font-medium text-slate-800 text-sm truncate">{db.name}</span>
+                <span className="text-[10px] text-slate-400 tabular-nums shrink-0">
+                  {db.rowCount} row{db.rowCount === 1 ? "" : "s"}
                 </span>
-              ))}
+              </div>
+              {db.description && (
+                <p className="mt-0.5 text-[11px] text-slate-600 line-clamp-2">{db.description}</p>
+              )}
+              <div className="mt-1 flex flex-wrap gap-1">
+                {db.properties.map((p) => (
+                  <span
+                    key={p.name}
+                    className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] text-slate-700"
+                    title={p.type}
+                  >
+                    {p.name}
+                    <span className="text-slate-400 ml-1">{p.type}</span>
+                  </span>
+                ))}
+              </div>
+            </button>
+            <div className="shrink-0 flex items-center pr-3">
+              <AutoToggle
+                enabled={auto}
+                disabled={!autoMaster}
+                title={
+                  !autoMaster
+                    ? "Auto-save is OFF globally. Re-enable in Settings."
+                    : auto
+                      ? "Auto-save ON — matching items skip the prompt and write directly to this DB."
+                      : "Auto-save OFF — matching items require manual approval."
+                }
+                onChange={(next) => onToggleAuto(db.id, next)}
+              />
             </div>
-          </button>
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ul>
+  );
+}
+
+function AutoToggle({
+  enabled,
+  disabled,
+  title,
+  onChange,
+}: {
+  enabled: boolean;
+  disabled?: boolean;
+  title?: string;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) onChange(!enabled);
+      }}
+      title={title}
+      className={
+        "flex items-center gap-1.5 px-2 py-1 rounded-md border text-[10px] uppercase tracking-wide font-medium transition " +
+        (disabled
+          ? "border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed"
+          : enabled
+            ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+            : "border-slate-300 bg-white text-slate-500 hover:bg-slate-50")
+      }
+    >
+      <span
+        className={
+          "inline-block w-2 h-2 rounded-full " +
+          (disabled ? "bg-slate-300" : enabled ? "bg-emerald-500" : "bg-slate-300")
+        }
+      />
+      auto {enabled ? "on" : "off"}
+    </button>
   );
 }
 

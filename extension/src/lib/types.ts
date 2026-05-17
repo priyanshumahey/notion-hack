@@ -192,7 +192,7 @@ export interface HybridActionOverride {
 export interface CompletionCandidate {
   id: string;
   detectedAt: number;
-  reason: "form-submit" | "terminal-nav" | "content-dwell" | "repetition" | "action-click" | "rich-page";
+  reason: "form-submit" | "terminal-nav" | "repetition" | "action-click" | "rich-page";
   /** Free-form, human-readable explanation of why the trigger fired. */
   triggerNote?: string;
   trigger: AppEvent;
@@ -220,6 +220,8 @@ export interface CompletionCandidate {
     appliedAt?: number;
     /** True when applied automatically (cluster previously approved by user). */
     auto?: boolean;
+    /** True when an existing matching row was found and re-used instead of creating a new one. */
+    deduped?: boolean;
   };
   hybridAction?: HybridActionOverride;
   /** User-authored instruction captured from the page prompt. */

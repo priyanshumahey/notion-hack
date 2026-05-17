@@ -39,6 +39,9 @@ export type Msg =
   | { t: "getKeyStatus" }
   | { t: "setOpenAiKey"; key: string }
   | { t: "testOpenAi" }
+  | { t: "getAutoApplyConfig" }
+  | { t: "setAutoApplyMaster"; enabled: boolean }
+  | { t: "setAutoApplyForDb"; dbId: string; enabled: boolean }
   | { t: "ping" };
 
 export type MsgResponse =
@@ -51,6 +54,7 @@ export type MsgResponse =
   | { t: "notionPages"; pages: NotionPage[] }
   | { t: "keyStatus"; hasKey: boolean; source: "stored" | "build" | "none"; redacted: string }
   | { t: "testResult"; ok: boolean; error?: string }
+  | { t: "autoApplyConfig"; master: boolean; byDb: Record<string, boolean> }
   | { t: "pong"; at: number }
   | { t: "error"; message: string };
 

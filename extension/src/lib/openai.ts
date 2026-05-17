@@ -23,38 +23,51 @@ const log = makeLog("bg");
 const MODEL = "gpt-4o-mini";
 const ENDPOINT = "https://api.openai.com/v1/chat/completions";
 
-const SYSTEM_PROMPT = `You are a backend agent for a browser extension that watches a user's web activity and saves meaningful tasks/artifacts/patterns to their Notion workspace.
+const SYSTEM_PROMPT = `You are a backend agent for a browser extension that watches a user's web activity and saves meaningful artifacts to their Notion workspace.
 
-You will receive a sequence of browser events and a TRIGGER REASON. Each event may include rich CONTEXT: the page's title, meta description, og:* tags, headings, JSON-LD structured data, a main-text excerpt, dwell metrics (foreground time, scroll depth, interactions), and (on form submissions) the submitted form's field labels and values. USE THIS CONTEXT — it is your primary source of truth. JSON-LD blocks especially often contain the exact information that should populate a Notion row.
+You receive a sequence of browser events plus a TRIGGER REASON. Each event may include rich CONTEXT: page title, meta description, og:* tags, headings, JSON-LD structured data, a main-text excerpt, dwell metrics, and (on form submissions) the submitted form's fields. USE THIS CONTEXT — it is your primary source of truth. JSON-LD especially often contains the exact data that should populate a Notion row.
 
-TRIGGER REASONS you may see:
-  - "form-submit": the user just submitted a form.
-  - "terminal-nav": the user just landed on a confirmation/success/thank-you-style page.
-  - "content-dwell": the user spent meaningful time engaging with a high-value content page (job posting, product, event, recipe, course, etc.). The page itself is the artifact — they didn't necessarily complete a transaction, they CONSUMED it intently.
-  - "repetition": the user has visited several distinct URLs that share the same canonicalized page-key pattern recently (e.g. multiple tweets from one author, multiple articles from one publisher, multiple product listings of a kind). The pattern is what's meaningful, not any single event.
-  - "action-click": the user repeatedly clicked the same UI element on the same host within minutes — same testid or same normalized label. Each click event represents one item the user acted on. We do NOT pre-filter by verb — the cluster might be Save / Bookmark / Like / Follow / Add to cart / Star / RSVP / Subscribe / Pin / Upvote / "Save Recipe" / "Add to my Notion" / a star icon / a heart icon / etc. — OR it might be something noisy (Delete, Next, Reply). YOU decide. If meaningful, PROPOSE A TRACKER DATABASE for the collection (e.g. "Bookmarked Tweets", "Saved Jobs", "Wishlist Items", "Saved Recipes", "Starred Repos"), and emit one row PER distinct item the user acted on, extracting what you can from each click's fingerprint text/accessibleName and from the surrounding page context. If individual items aren't separable from the click fingerprints, emit one summary row describing the pattern (e.g. "5 saves on allrecipes.com") and explain in reasoning what was acted on. If the clicks are clearly noise (Delete in inbox, pagination, dismissing notifications), set meaningful=false.
-  - "rich-page": the user landed on a page that LOOKS LIKE a saveable artifact (recipe, product, job posting, article, event, listing, etc.) based on JSON-LD / og:type / structured data. NO dwell or repetition was required to fire this — it fires speculatively on the page load. Use it as a routing opportunity: if the page's artifact-type matches an EXISTING DATABASE (e.g. allrecipes.com Recipe page when "Saved Recipes" exists), set meaningful=true with mode="use-existing" pointing at that DB and emit ONE row for this artifact. If no existing DB is a natural fit and the page doesn't seem worth saving on its own, set meaningful=false. Be CONSERVATIVE about creating brand-new databases from a single rich-page trigger — prefer use-existing or meaningful=false.
+Trigger reasons you may see:
+  - form-submit   — user just submitted a form.
+  - terminal-nav  — user landed on a confirmation / success / thank-you page.
+  - repetition    — user has visited several distinct URLs that share a canonical pageKey pattern (e.g. multiple tweets from one author, multiple product listings). The pattern is what's meaningful.
+  - action-click  — user repeatedly clicked the same UI element on the same host within minutes. Each click represents one item the user acted on (could be Save / Bookmark / Like / Add to cart / Star / etc. — or noise like Delete / Next). YOU decide what's being collected. If meaningful, emit one row per distinct item from the click fingerprints + surrounding context; if individual items aren't separable, emit one summary row.
+  - rich-page     — user is looking at a page with substantive content (structured data, og tags, or a meaningful text body). The page may or may not be a saveable artifact — YOU decide what kind of thing it is by reading the URL, title, JSON-LD, og tags, and main text, and whether it's worth saving.
 
-CRITICAL — REUSE EXISTING DATABASES AGGRESSIVELY: If EXISTING DATABASES contains a DB whose name or description matches the artifact type (e.g. "Saved Recipes" for a Recipe page, "Saved Jobs" for a JobPosting, "Wishlist" for a Product), you MUST set mode="use-existing" and existingId to that DB's id. The user has ALREADY decided this is a destination they care about; routing a new item there is the entire point. Only fall back to create-new when no existing DB is a remotely plausible fit. When in doubt between use-existing and create-new, prefer use-existing. The schema of the existing DB tells you which columns to populate.
+YOUR JOB:
 
-Your job:
+1. Decide whether the sequence represents something MEANINGFUL — worth saving to Notion.
+   Meaningful examples: applied for a job, made a purchase, signed up, RSVP'd, scheduled a meeting, saved/bookmarked, viewed a specific job posting / product / recipe / event / article they care about, recurring pattern of consuming content from a specific source, repeated action-clicks of the "save / bookmark / wishlist / star" kind.
+   NOT meaningful: random searches, abandoned forms, login screens, cookie banners, captchas, filter changes, app shells, admin/settings pages, dashboards, ephemeral notifications.
 
-1. Decide whether the sequence represents something MEANINGFUL — worth saving to Notion. Be generous on "content-dwell" and "repetition" triggers: the heuristics have already filtered for engagement and recurrence, your job is to recognize what kind of artifact this is.
-   - Meaningful examples: submitted a job application, made a purchase, signed up, scheduled a meeting, RSVP'd, saved/bookmarked, completed a transaction, engaged deeply with a job posting or product or event, recurring pattern of consuming content from a specific source (e.g. tweets from one account, articles from one publisher, recipes from one site), repeated action-clicks on a host (e.g. bookmarking tweets, saving jobs, wishlisting products, following authors).
-   - NOT meaningful: random searches, abandoned forms, login screens, cookie banners, captchas, filter changes, app shells, ephemeral notifications.
+2. If meaningful, produce a NOTION PROPOSAL.
 
-2. If meaningful, produce a NOTION PROPOSAL:
-   a. Target database — reuse one from "EXISTING DATABASES" (mode: "use-existing", set existingId) or propose a new one (mode: "create-new", existingId: null). Prefer reusing when the artifact fits naturally.
-   b. For a new database: a short descriptive name, one-line description, schema of 4-8 properties. Property types: title, rich_text, url, date, select, multi_select, number. EXACTLY ONE property must be type "title". Use options[] only for select/multi_select; otherwise pass [].
-   c. The row values — array of {property, value} pairs. Each property name MUST match the schema. Value types:
-      - title/rich_text/url/select: string
-      - date: ISO 8601
-      - number: number
-      - multi_select: array of strings
-   d. For repetition: the row should represent the PATTERN (e.g. an entry in "Followed Authors" or "Frequently Read Publishers"), not the most recent single instance. The database schema should make sense for an evolving collection. Use JSON-LD author/publisher fields when present.
-   e. Extract values only from observable data. Prefer JSON-LD when available — it's authoritative. Omit cells where the value isn't observable.
+ROUTING (where the row goes):
+  - Prefer REUSING an existing database from "EXISTING DATABASES" when the artifact naturally fits one (mode="use-existing", set existingId). Match by name first, then sample-row similarity, then schema shape. Use the existing DB's exact column names (don't rename "source" to "publisher").
+  - Otherwise PROPOSE A NEW DATABASE (mode="create-new", existingId=null) — only when the artifact is clearly worth its own collection AND no existing DB fits.
+  - Otherwise set meaningful=false.
 
-3. If NOT meaningful, set meaningful=false, give a one-sentence reasoning, proposal=null.
+USER-HISTORY SIGNALS (when provided):
+  - Per-DB "user-history (30d): approved=N denied=M" — DBs with several approvals and zero denials are STRONG attractors; route there generously. DBs with multiple denials are NEGATIVE signals — be selective about routing items there.
+  - Host-level "USER HISTORY ON THIS HOST" — if the user has reliably saved from this host before, lean toward meaningful=true. If they've reliably denied, lean toward meaningful=false unless the fit is overwhelming.
+  - User behavior trumps abstract type-matching: they know what they want saved.
+
+NEW DATABASE SCHEMAS (when create-new):
+  - Short descriptive name, one-line description, 4-8 properties.
+  - Property types: title, rich_text, url, date, select, multi_select, number.
+  - EXACTLY ONE property must be type "title". Use options[] only for select/multi_select; otherwise pass [].
+
+ROW VALUES:
+  - Each property name MUST match the schema.
+  - Value types: title/rich_text/url/select → string; date → ISO 8601; number → number; multi_select → array of strings.
+  - Extract values only from observable data. Prefer JSON-LD when available — it's authoritative. Omit cells where the value isn't observable.
+
+DATE-FIELD SEMANTICS — read the property name to decide what the date means:
+  - "Date Saved", "Saved At", "Added", "Bookmarked", "Created" → the time the user is saving this NOW. Use the TRIGGER TIMESTAMP (provided in the user message as "NOW") as ISO 8601.
+  - "Date Posted", "Published", "Application Deadline", "Event Date" → extract from JSON-LD / page context. If not present, OMIT the field rather than guess.
+  - NEVER fabricate a date.
+
+REPETITION-specific: the row should represent the PATTERN (e.g. an entry in "Followed Authors", "Frequently Read Publishers"), not the most recent single instance. Use JSON-LD author/publisher fields when present.
 
 Always return STRICT JSON matching this exact shape (no markdown, no commentary):
 
@@ -77,19 +90,35 @@ Always return STRICT JSON matching this exact shape (no markdown, no commentary)
 export interface KnownDatabase {
   id: string;
   name: string;
+  description?: string;
   properties: NotionPropertySpec[];
+  rowCount?: number;
+  /** Up to 3 one-line summaries of recent rows in the DB. Shown to the LLM
+   *  so it can see what kind of artifact already lives in each destination. */
+  samples?: string[];
+}
+
+export interface UserHistorySignal {
+  /** dbId → approval/denial counts over the last 30 days. */
+  byDb: Record<string, { applied: number; denied: number }>;
+  /** Approvals on the current trigger host (last 30 d). */
+  hostApplied: number;
+  /** Denials on the current trigger host (last 30 d). */
+  hostDenied: number;
+  triggerHost: string;
 }
 
 export async function judgeCandidate(
   candidate: CompletionCandidate,
   knownDatabases: KnownDatabase[],
+  userHistory?: UserHistorySignal,
 ): Promise<Judgement> {
   const key = await getOpenAiKey();
   if (!key) {
     throw new Error("no-openai-key");
   }
 
-  const userPrompt = buildUserPrompt(candidate, knownDatabases);
+  const userPrompt = buildUserPrompt(candidate, knownDatabases, userHistory);
   log("judge → openai", { reason: candidate.reason, ctxLen: candidate.context.length });
 
   const resp = await fetch(ENDPOINT, {
@@ -145,15 +174,31 @@ export async function pingOpenAi(): Promise<{ ok: boolean; error?: string }> {
 // Prompt construction + validation
 // ---------------------------------------------------------------------------
 
-function buildUserPrompt(candidate: CompletionCandidate, dbs: KnownDatabase[]): string {
+function buildUserPrompt(
+  candidate: CompletionCandidate,
+  dbs: KnownDatabase[],
+  userHistory?: UserHistorySignal,
+): string {
+  const stats = userHistory?.byDb ?? {};
   const dbBlock = dbs.length
     ? dbs
-        .map(
-          (d) =>
-            `- id: ${d.id}\n  name: ${d.name}\n  properties: ${d.properties
-              .map((p) => `${p.name}:${p.type}`)
-              .join(", ")}`,
-        )
+        .map((d) => {
+          const s = stats[d.id];
+          const lines = [`- id: ${d.id}`, `  name: ${d.name}`];
+          if (d.description) lines.push(`  description: ${d.description}`);
+          if (typeof d.rowCount === "number") lines.push(`  rows: ${d.rowCount}`);
+          if (s && (s.applied || s.denied)) {
+            lines.push(`  user-history (30d): approved=${s.applied} denied=${s.denied}`);
+          }
+          lines.push(
+            `  properties: ${d.properties.map((p) => `${p.name}:${p.type}`).join(", ")}`,
+          );
+          if (d.samples && d.samples.length) {
+            lines.push(`  recent rows:`);
+            for (const s of d.samples) lines.push(`    · ${s}`);
+          }
+          return lines.join("\n");
+        })
         .join("\n")
     : "(none — propose a new database)";
 
@@ -179,16 +224,33 @@ function buildUserPrompt(candidate: CompletionCandidate, dbs: KnownDatabase[]): 
     used += line.length;
   }
 
+  const hostBlock = userHistory
+    ? userHistory.hostApplied || userHistory.hostDenied
+      ? `USER HISTORY ON THIS HOST (${userHistory.triggerHost}, 30d): approved=${userHistory.hostApplied} denied=${userHistory.hostDenied}` +
+        (userHistory.hostDenied >= 2 && userHistory.hostApplied === 0
+          ? "  ⚠️ user has repeatedly rejected suggestions from this host — bias toward meaningful=false unless the fit is overwhelmingly obvious."
+          : userHistory.hostApplied >= 2 && userHistory.hostDenied === 0
+            ? "  ✅ user reliably saves from this host — be generous about routing."
+            : "")
+      : `USER HISTORY ON THIS HOST (${userHistory.triggerHost}, 30d): no prior approvals or denials.`
+    : "";
+
   return [
     `EXISTING DATABASES:`,
     dbBlock,
+    ``,
+    `NOW: ${new Date(candidate.trigger.ts).toISOString()}`,
+    hostBlock ? `` : ``,
+    hostBlock,
     ``,
     `EVENT SEQUENCE (oldest → newest, summaries):`,
     earlierLines.length ? earlierLines.join("\n") : "(no prior context in window)",
     ``,
     `TRIGGER EVENT (${candidate.reason}${candidate.triggerNote ? `: ${candidate.triggerNote}` : ""}):`,
     triggerBlock,
-  ].join("\n");
+  ]
+    .filter((s) => s !== "")
+    .join("\n");
 }
 
 /** Compact one-line summary for non-trigger context events. */

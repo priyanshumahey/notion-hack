@@ -18,7 +18,7 @@ import { newId } from "../lib/ids";
 import { ingest, retryJudge } from "./ingest";
 import { applyCandidate, denyCandidate } from "./apply";
 import { getNotionGateway } from "../lib/notion/gateway";
-import { describeKeySource, hasOpenAiKey, redactKey, setOpenAiKey, getOpenAiKey } from "../lib/settings";
+import { describeKeySource, hasOpenAiKey, redactKey, setOpenAiKey, getOpenAiKey, getAutoApplyConfig, setAutoApplyMaster, setAutoApplyForDb } from "../lib/settings";
 import { pingOpenAi } from "../lib/openai";
 import type { Msg, MsgResponse } from "../lib/messages";
 import type { AppEvent, RawEvent } from "../lib/types";
@@ -167,6 +167,20 @@ async function handle(msg: Msg, sender: chrome.runtime.MessageSender): Promise<M
     case "testOpenAi": {
       const r = await pingOpenAi();
       return { t: "testResult", ok: r.ok, error: r.error };
+    }
+    case "getAutoApplyConfig": {
+      const cfg = await getAutoApplyConfig();
+      return { t: "autoApplyConfig", master: cfg.master, byDb: cfg.byDb };
+    }
+    case "setAutoApplyMaster": {
+      await setAutoApplyMaster(msg.enabled);
+      log("auto-apply master →", msg.enabled);
+      return { t: "ok" };
+    }
+    case "setAutoApplyForDb": {
+      await setAutoApplyForDb(msg.dbId, msg.enabled);
+      log("auto-apply db", msg.dbId, "→", msg.enabled);
+      return { t: "ok" };
     }
     case "ping":
       return { t: "pong", at: Date.now() };

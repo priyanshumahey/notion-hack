@@ -281,7 +281,14 @@ function CompletionRow({
                 onClick={onOpenNotion}
                 className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] uppercase tracking-wide hover:bg-emerald-200"
               >
-                {c.applied.auto ? "⚡ auto-applied" : "✓ applied"} · view in notion
+                {c.applied.deduped
+                  ? c.applied.auto
+                    ? "⚡ already saved"
+                    : "✓ already saved"
+                  : c.applied.auto
+                    ? "⚡ auto-applied"
+                    : "✓ applied"}{" "}
+                · view in notion
               </button>
             )}
             {c.applied?.status === "skipped" && (
@@ -416,7 +423,6 @@ function ReasonBadge({ reason }: { reason: CompletionCandidate["reason"] }) {
   const color: Record<CompletionCandidate["reason"], string> = {
     "form-submit": "bg-emerald-100 text-emerald-800",
     "terminal-nav": "bg-sky-100 text-sky-800",
-    "content-dwell": "bg-teal-100 text-teal-800",
     "repetition": "bg-fuchsia-100 text-fuchsia-800",
     "action-click": "bg-orange-100 text-orange-800",
     "rich-page": "bg-indigo-100 text-indigo-800",
