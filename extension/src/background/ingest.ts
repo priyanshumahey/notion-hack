@@ -50,6 +50,7 @@ const ACTION_CLICK_THROTTLE_MS = 5 * 60_000;         // 5 min per (host, verb)
 const ACTION_CLICK_CONTEXT_WINDOW_MS = 5 * 60_000;   // include action-clicks from last 5 min in context
 const ACTION_CLICK_MAX_CONTEXT = 40;                 // hard cap on context size for action-click
 const AUTO_APPLY_MIN_CONFIDENCE = 0.55;              // skip silent apply when LLM is wishy-washy
+const RICH_PAGE_DEDUP_MS = 24 * 60 * 60_000;         // 24 h per-URL dedup for rich-page trigger
 
 export async function ingest(event: AppEvent): Promise<void> {
   await events.append(event);
@@ -64,9 +65,10 @@ export async function ingest(event: AppEvent): Promise<void> {
   const history = await events.recent(LOOKBACK_FETCH);
 
   // Build the throttle sets. Cheap scans of the latest few hundred candidates.
-  const [repThrottle, recentlyFiredAction] = await Promise.all([
+  const [repThrottle, recentlyFiredAction, recentlyFiredRichUrls] = await Promise.all([
     loadRepetitionThrottle(),
     loadRecentActionClusters(),
+    loadRecentRichUrls(),
   ]);
 
   const triggers = detectTriggers({
@@ -75,6 +77,7 @@ export async function ingest(event: AppEvent): Promise<void> {
     recentlyFiredRepetitionClusters: repThrottle.blockedClusters,
     recentlyFiredRepetitionUrls: repThrottle.firedUrls,
     recentlyFiredActionClusters: recentlyFiredAction,
+    recentlyFiredRichUrls,
   });
   if (triggers.length === 0) return;
   log("triggers fired", triggers.map((t) => `${t.reason}(${t.note})`).join(", "));
@@ -356,6 +359,23 @@ async function loadRecentActionClusters(): Promise<Set<string>> {
     const sig = clickSignature(c.trigger.fingerprint);
     if (!sig) continue;
     out.add(`${host}::${sig}`);
+  }
+  return out;
+}
+
+/**
+ * URLs we've already created a `rich-page` candidate for within the
+ * dedup window. Prevents the judge from being called on every revisit to
+ * the same article/recipe/product.
+ */
+async function loadRecentRichUrls(): Promise<Set<string>> {
+  const recent = await completions.recent(500);
+  const out = new Set<string>();
+  const cutoffTs = Date.now() - RICH_PAGE_DEDUP_MS;
+  for (const c of recent) {
+    if (c.reason !== "rich-page") continue;
+    if (c.detectedAt < cutoffTs) continue;
+    out.add(c.trigger.url);
   }
   return out;
 }

@@ -503,6 +503,8 @@ function labelForCompletionReason(reason: Extract<Msg, { t: "completionPrompt" }
       return "Submitted workflow";
     case "terminal-nav":
       return "Completed workflow";
+    case "rich-page":
+      return "Saveable page";
   }
 }
 
