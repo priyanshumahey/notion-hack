@@ -34,7 +34,7 @@ import { buildLookback } from "../lib/completion/lookback";
 import { hasOpenAiKey } from "../lib/settings";
 import { judgeCandidate, type KnownDatabase } from "../lib/openai";
 import { getNotionGateway } from "../lib/notion/gateway";
-import { applyCandidate } from "./apply";
+import { executeConnectorFlow } from "./connectors";
 import type { AppEvent, CompletionCandidate } from "../lib/types";
 
 const log = makeLog("bg");
@@ -175,8 +175,8 @@ async function runTrigger(event: AppEvent, trig: Trigger, history: AppEvent[]): 
       const dbId = judgement.proposal.database.existingId;
       if (await isApprovedDatabase(dbId)) {
         log("auto-apply: DB previously approved", candidate.id, "→", dbId);
-        await applyCandidate(candidate.id, { auto: true });
-        autoApplied = true;
+        const result = await executeConnectorFlow("notion", candidate.id, { auto: true });
+        autoApplied = result.completion?.applied?.status === "applied";
       }
     }
 

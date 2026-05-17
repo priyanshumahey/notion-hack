@@ -45,7 +45,7 @@ export function CompletionsView({ hasKey, onNeedKey, onOpenNotion }: Props) {
     refresh();
   }
   async function onApply(id: string) {
-    await send({ t: "applyCandidate", id });
+    await send({ t: "executeConnectorFlow", connectorId: "notion", candidateId: id });
     refresh();
   }
   async function onDeny(id: string) {
@@ -213,7 +213,7 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDe
                   onClick={onApply}
                   className="px-2.5 py-1 rounded bg-emerald-600 text-white hover:bg-emerald-700 text-[11px] font-medium"
                 >
-                  approve &amp; add to notion
+                  run Notion flow
                 </button>
                 <button
                   onClick={onDeny}
@@ -272,6 +272,28 @@ function CompletionRow({ c, expanded, onToggle, onRetry, onDelete, onApply, onDe
               delete
             </button>
           </div>
+
+          {c.connectorRuns && c.connectorRuns.length > 0 && (
+            <Section label="Connector runs">
+              <ul className="text-[11px] text-slate-600 space-y-1">
+                {c.connectorRuns.slice(-4).reverse().map((run) => (
+                  <li key={`${run.connectorId}-${run.ranAt}`} className="flex items-center gap-2">
+                    <span
+                      className={
+                        "px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide " +
+                        (run.status === "applied"
+                          ? "bg-emerald-100 text-emerald-800"
+                          : "bg-rose-100 text-rose-800")
+                      }
+                    >
+                      {run.connectorLabel}
+                    </span>
+                    <span className="truncate">{run.message}</span>
+                  </li>
+                ))}
+              </ul>
+            </Section>
+          )}
         </div>
       )}
     </li>

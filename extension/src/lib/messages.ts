@@ -3,6 +3,7 @@
 // wrapper buy us refactor safety without a heavyweight RPC framework.
 
 import type { AppEvent, CompletionCandidate } from "./types";
+import type { ConnectorId, ConnectorInfo } from "./connectors";
 import type { NotionDatabase, NotionPage } from "./notion/types";
 
 export type Msg =
@@ -28,6 +29,11 @@ export type Msg =
   | { t: "clearCompletions" }
   | { t: "applyCandidate"; id: string }
   | { t: "denyCandidate"; id: string }
+  // popup → bg : connectors / flows
+  | { t: "listConnectors" }
+  | { t: "connectConnector"; id: ConnectorId }
+  | { t: "disconnectConnector"; id: ConnectorId }
+  | { t: "executeConnectorFlow"; connectorId: ConnectorId; candidateId?: string }
   // popup → bg : notion (mock for now)
   | { t: "notionListDatabases" }
   | { t: "notionGetDatabase"; id: string }
@@ -44,6 +50,8 @@ export type MsgResponse =
   | { t: "recent"; events: AppEvent[] }
   | { t: "completions"; completions: CompletionCandidate[] }
   | { t: "completion"; completion: CompletionCandidate | null }
+  | { t: "connectors"; connectors: ConnectorInfo[] }
+  | { t: "connectorFlowResult"; connector: ConnectorInfo; completion: CompletionCandidate | null }
   | { t: "notionDatabases"; workspace: string; databases: NotionDatabase[] }
   | { t: "notionDatabase"; database: NotionDatabase | null }
   | { t: "notionPages"; pages: NotionPage[] }

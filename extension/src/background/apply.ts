@@ -11,6 +11,7 @@ import { getCompletionStore } from "../lib/store";
 import { getNotionGateway } from "../lib/notion/gateway";
 import { coerceRow } from "../lib/notion/coerce";
 import { makeLog } from "../lib/log";
+import { isConnectorConnected } from "../lib/connectors";
 import type { CompletionCandidate } from "../lib/types";
 import type { NotionDatabase } from "../lib/notion/types";
 
@@ -26,6 +27,27 @@ export async function applyCandidate(
 
   if (candidate.applied?.status === "applied") {
     return candidate; // idempotent
+  }
+  if (!(await isConnectorConnected("notion"))) {
+    candidate.applied = {
+      status: "failed",
+      errorMessage: "Notion connector is not connected.",
+      appliedAt: Date.now(),
+    };
+    candidate.connectorRuns = [
+      ...(candidate.connectorRuns ?? []),
+      {
+        connectorId: "notion",
+        connectorLabel: "Notion",
+        action: "Create page",
+        status: "failed",
+        message: "Notion connector is not connected.",
+        ranAt: Date.now(),
+        auto: opts.auto,
+      },
+    ];
+    await store.update(candidate);
+    return candidate;
   }
   if (!candidate.judgement?.proposal) {
     candidate.applied = {
@@ -71,6 +93,7 @@ export async function applyCandidate(
       sourceCandidateId: candidate.id,
     });
 
+    candidate.status = "promoted";
     candidate.applied = {
       status: "applied",
       databaseId: database.id,
@@ -80,6 +103,19 @@ export async function applyCandidate(
       appliedAt: Date.now(),
       auto: opts.auto,
     };
+    candidate.connectorRuns = [
+      ...(candidate.connectorRuns ?? []),
+      {
+        connectorId: "notion",
+        connectorLabel: "Notion",
+        action: "Create page",
+        status: "applied",
+        message: `Saved to ${database.name}.`,
+        url: page.url,
+        ranAt: Date.now(),
+        auto: opts.auto,
+      },
+    ];
     await store.update(candidate);
     log(opts.auto ? "auto-applied" : "applied", candidate.id, "→", database.name, page.id);
     return candidate;

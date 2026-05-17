@@ -470,9 +470,26 @@ function showCompletionPrompt(prompt: Extract<Msg, { t: "completionPrompt" }>) {
   yes.type = "button";
   yes.className = "nh-completion-button is-primary";
   yes.textContent = "Yes";
-  yes.addEventListener("click", (e) => {
+  yes.addEventListener("click", async (e) => {
     e.stopPropagation();
-    void send({ t: "setCompletionStatus", id: prompt.id, status: "promoted" });
+    yes.disabled = true;
+    no.disabled = true;
+    body.textContent = "Saving to Notion...";
+    const resp = await send({ t: "setCompletionStatus", id: prompt.id, status: "promoted" });
+    if (resp.t === "error") {
+      body.textContent = "Could not save to Notion.";
+      meta.textContent = resp.message;
+      yes.disabled = false;
+      no.disabled = false;
+      return;
+    }
+    if (resp.t === "completion" && resp.completion?.applied?.status === "failed") {
+      body.textContent = "Could not save to Notion.";
+      meta.textContent = resp.completion.applied.errorMessage ?? "Apply failed.";
+      yes.disabled = false;
+      no.disabled = false;
+      return;
+    }
     root.remove();
   });
 
